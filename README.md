@@ -13,6 +13,14 @@
 - `git clone https://gitee.com/lisq58/excavator_detect.git`
 - `git submodule update --init --recursive`
 - 检查[src/realsense-ros]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/rgbd_launch](https://gitee.com/lisq58/excavator_detect/tree/master/src), [src/yolov5_ros/yolov5_ros/yolov5](https://gitee.com/lisq58/excavator_detect/tree/master/src/yolov5_ros/yolov5_ros)目录下子模块均有内容即可
+- 阅读`src/realsense-ros/README.md`安装`ros-melodic-realsense2-camera`与`ros-melodic-realsense2-description`
+
+```
+cd /opt/ros/melodic/share/cv_bridge/cmake/
+sudo gedit cv_bridgeConfig.cmake
+```
+
+- 若在TX2中使用，将该cmake文件94行最后一个索引改为/usr/include/opencv4
 
 ## 基本用法
 
