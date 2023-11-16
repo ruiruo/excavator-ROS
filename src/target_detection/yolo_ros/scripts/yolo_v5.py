@@ -88,10 +88,24 @@ class Yolo_Dect:
         distance_list = np.sort(distance_list)[randnum//2-randnum//4:randnum//2+randnum//4] #冒泡排序+中值滤波
         return np.round(np.mean(distance_list)/10,4) #距离单位为cm
 
+    def get_mid_pos(self, box,depth_data, step):
+        distance_list = []
+        mid_pos = [(box[0] + box[2])//2, (box[1] + box[3])//2] 
+        min_val = min(abs(box[2] - box[0]), abs(box[3] - box[1])) 
+        bias = min_val if min_val < step else step
+        scope = bias**2
+        for i in range( scope):
+            dist = depth_data[int(mid_pos[1] + i - bias*(i//bias)), int(mid_pos[0] + i//bias)]
+            if dist:
+                distance_list.append(dist)
+        distance_list = np.array(distance_list)
+        distance_list = np.sort(distance_list)[ scope//2- scope//4: scope//2+ scope//4] #冒泡排序+中值滤波
+        return np.round(np.mean(distance_list)/10,4) 
+
     def dect(self, boxs):
 
         for box in boxs:
-            distance = self.get_randnum_pos(box, self.depth_data, 24)
+            distance = self.get_mid_pos(box, self.depth_data, 10)
             boundingBox = BoundingBox()
             boundingBox.probability = np.float64(box[4])
             boundingBox.distance = np.float64(distance)
