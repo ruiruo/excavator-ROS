@@ -6,7 +6,7 @@
 
   <maintainer email="1323614196@qq.com">Li Shaoqian</maintainer>
 
-  <license>TODO</license>
+  <license>MIT</license>
 
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>rospy</build_depend>

@@ -1,10 +1,10 @@
-[submodule "src/yolov5_ros/yolov5_ros/yolov5"]
-	path = src/yolov5_ros/yolo_ros/yolov5
+[submodule "src/target_detection/yolov5_ros/yolov5"]
+	path = src/target_detection/yolo_ros/yolov5
 	url = https://gitee.com/lisq58/yolov5_v6.2_for_ros.git
 [submodule "src/realsense-ros"]
 	path = src/realsense-ros
 	url = https://gitee.com/lisq58/my_realsense_ros1.git
 [submodule "src/rgbd_launch"]
 	path = src/rgbd_launch
-	url = https://github.com/ros-drivers/rgbd_launch.git
+	url = https://gitee.com/lisq58/my_rgbd_launch.git
 	branch = jade-devel
