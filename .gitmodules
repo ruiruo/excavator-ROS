@@ -8,3 +8,7 @@
 	path = src/rgbd_launch
 	url = https://gitee.com/lisq58/my_rgbd_launch.git
 	branch = jade-devel
+[submodule "geometry2_python3"]
+	path = src/geometry2_python3
+	url = https://gitee.com/lisq58/geometry2_python3.git
+	branch = melodic-devel

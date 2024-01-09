@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.6
+#!/usr/bin/env python3.7
 # -*- coding: utf-8 -*-
 
 import cv2
@@ -29,7 +29,7 @@ class Yolo_Dect:
         pub_topic = rospy.get_param('~pub_topic', '/yolov5/BoundingBoxes')
         conf = rospy.get_param('~conf', '0.5')
 
-        # load local repository(YoloV5:v6.0)
+        # load local repository
         self.model = torch.hub.load(yolov5_path, 'custom',
                                     path=weight_path, source='local')
 
@@ -38,6 +38,8 @@ class Yolo_Dect:
             self.model.cpu()
         else:
             self.model.cuda()
+            if (rospy.get_param('/use_half', 'true')):
+                self.model.half()
 
         self.model.conf = conf
         self.color_image = Image()
@@ -49,10 +51,10 @@ class Yolo_Dect:
         self.calibrate_flag_sub = rospy.Subscriber(calibrate_flag, Calibrate_flag, 
                                           queue_size=10, callback= self.flag_callback)
         self.color_sub = message_filters.Subscriber(color_image_topic, Image, 
-                                          queue_size=1, buff_size=52428800)
+                                          queue_size=1, buff_size=9216000)
         self.depth_sub = message_filters.Subscriber(depth_image_topic, Image,
-                                          queue_size=1, buff_size=52428800)
-        self.ts = message_filters.TimeSynchronizer([self.color_sub, self.depth_sub], 1)
+                                          queue_size=1, buff_size=9216000)
+        self.ts = message_filters.TimeSynchronizer([self.color_sub, self.depth_sub], 10)
         self.ts.registerCallback(self.image_callback)
 
         # output publishers
@@ -62,7 +64,8 @@ class Yolo_Dect:
             if(rospy.get_rostime().secs-self.getImageSec.secs > 5):
                 rospy.logwarn_throttle_identical(5,"waiting for image form target detect node.")
             try:
-                cv2.imshow('YOLOv5', self.color_image)
+                if ((self.color_image.shape[0] == 640) and (self.color_image.shape[1] == 640)):
+                    cv2.imshow('YOLOv5', self.color_image)
             except:
                 pass
             cv2.waitKey(1)
@@ -80,21 +83,19 @@ class Yolo_Dect:
         rospy.loginfo_throttle_identical(60,"Get image!")
         self.color_image = np.frombuffer(color_image.data, dtype=np.uint8).reshape(
             color_image.height, color_image.width, -1)
-        self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
         self.depth_image = np.frombuffer(depth_image.data, dtype=np.uint16).reshape(
        color_image.height, color_image.width)
         
+        self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
         self.color_image = cv2.rotate(self.color_image, cv2.ROTATE_90_CLOCKWISE)
         self.color_image = cv2.resize(self.color_image, (640, 640), interpolation=cv2.INTER_LINEAR)
-        self.yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
-        self.yuv_image[:,:,0] = cv2.equalizeHist(self.yuv_image[:,:,0])
-        self.color_image = cv2.cvtColor(self.yuv_image, cv2.COLOR_YUV2RGB)
+        # self.yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
+        # self.yuv_image[:,:,0] = cv2.equalizeHist(self.yuv_image[:,:,0])
+        # self.color_image = cv2.cvtColor(self.yuv_image, cv2.COLOR_YUV2RGB)
         self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
 
-        results = self.model(self.color_image)
+        results = self.model(self.color_image, size=640,augment=False)
         # xmin    ymin    xmax   ymax  confidence  class    name
-        self.depth_image = np.frombuffer(depth_image.data, dtype=np.uint16).reshape(
-       color_image.height, color_image.width)
 
         boxs = results.pandas().xyxy[0].values
         self.dect( boxs)
