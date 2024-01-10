@@ -4,25 +4,26 @@
 import numpy as np
 import math
 
-import rospy, tf2_ros, transforms3d
+import rospy, tf2_ros
+import pytransform3d as pt
 from geometry_msgs.msg import TransformStamped, Vector3
 from std_msgs.msg import Header
 from sensor_msgs.msg import CameraInfo,Imu
 from coordinate_system_conversion.msg import  Calibrate_flag, Coordinate_point, Coordinate_points
-from yolov5_ros_msgs.msg import BoundingBox, BoundingBoxes
+from target_detection.msg import Target_Point, Target_Points
 
 class Coordinate_Point:
     def __init__(self) :
 
         coordinate_information_topic = rospy.get_param(
-            '~coordinate_information_topic', '/yolov5/BoundingBoxes')
+            '~coordinate_information_topic', '/target_detection/Target_Points')
         camera_info_topic = rospy.get_param('~camera_info_topic', '/camera/color/camera_info')
         accel_info_topic = rospy.get_param('~accel_info_topic', '/camera/accel/sample')
 
         pub_topic = rospy.get_param('~pub_topic', '/coordinate_system_conversion/CoordinatePoint')
         pub_flag_topic = rospy.get_param('~pub_flag_topic', '/coordinate_system_conversion/CalibrateFlag')
 
-        self.Boundingboxes = BoundingBoxes()
+        self.TargetPoints = Target_Points()
         self.cam_info = CameraInfo()
         self.accel_info = Imu()
         self.K = np.eye(3)
@@ -40,7 +41,7 @@ class Coordinate_Point:
         self.flag_timer = rospy.Timer(rospy.Duration(1),callback=self.flag_callback)
 
         #subscribers
-        self.Boundingbox_sub = rospy.Subscriber(coordinate_information_topic, BoundingBoxes, 
+        self.Boundingbox_sub = rospy.Subscriber(coordinate_information_topic, Target_Points, 
                                           queue_size=10, callback=self.conversion_callback)
         self.cam_info_sub = rospy.Subscriber(camera_info_topic, CameraInfo, 
                                           queue_size=10, callback=self.info_callback)
@@ -65,18 +66,18 @@ class Coordinate_Point:
         else:
             self.flag_pub.publish(self.calibrate_flag)
 
-    def conversion_callback(self, Boundingboxes):
+    def conversion_callback(self, TargetPoints):
         self.get_sub_time[0] = rospy.get_rostime()
         self.coordinate_points = Coordinate_points()
-        self.coordinate_points.header = Boundingboxes.header
-        for box in Boundingboxes.bounding_boxes:
+        self.coordinate_points.header = TargetPoints.header
+        for box in TargetPoints.target_points:
             if((box.distance == np.nan)): continue
             coordinate_point = Coordinate_point()
             coordinate_point.Class = box.Class
             coordinate_point.probability = box.probability
             point = np.array([(box.xmax-box.xmin)/2.0, (box.ymax-box.ymin)/2.0, 1])
             #x,y,z 东 天 北 eun
-            coordinate_point.x, coordinate_point.y, coordinate_point.z = box.distance *np.linalg.inv(self.K) @ point
+            coordinate_point.x, coordinate_point.y, coordinate_point.z = np.dot(box.distance *np.linalg.inv(self.K) , point)
             #缺少仿射矩阵从相机坐标转换至机体坐标
             self.coordinate_points.coordinate_points.append( coordinate_point)
         self.position_pub.publish(self.coordinate_points)
@@ -127,14 +128,16 @@ class Coordinate_Point:
 
         
     def color_to_world_coordinate_system(self, pitch, roll):
-        R_camera_color = transforms3d.quaternions.quat2mat([self.color_transform.transform.rotation.x, 
-                                                     self.color_transform.transform.rotation.y, self.color_transform.transform.rotation.z, 
-                                                     self.color_transform.transform.rotation.w])
-        #加速度计到相机坐标系仅有平移关系
-        #缺少视觉相机获取yaw
-        R_world_accel = transforms3d.euler.euler2mat(np.deg2rad(roll), np.deg2rad(pitch), np.deg2rad(0), 'sxyz')
-        R_color_world = np.dot(R_camera_color.T, R_world_accel.T)
+        R_camera_color = pt.rotations.quaternion_matrix([self.color_transform.transform.rotation.w, 
+                                                 self.color_transform.transform.rotation.x, 
+                                                 self.color_transform.transform.rotation.y, 
+                                                 self.color_transform.transform.rotation.z])[:3, :3]
 
+        # 加速度计到相机坐标系仅有平移关系
+        # 缺少视觉相机获取yaw
+        # 将欧拉角转换为旋转矩阵
+        R_world_accel = pt.rotations.euler_zyx_matrix([0, np.deg2rad(pitch), np.deg2rad(roll)])[:3, :3]
+        R_color_world = np.dot(R_camera_color.T, R_world_accel.T)
 
 
 def main():

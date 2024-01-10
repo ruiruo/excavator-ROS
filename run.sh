@@ -5,7 +5,7 @@ init(){
     echo -e "All nodes start! "
     gnome-terminal --window -- roslaunch realsense2_camera rs_rgbd.launch color_width:=640 color_height:=480 depth_width:=640 depth_height:=480 color_fps:=30 depth_fps:=30
     sleep 2
-    gnome-terminal --window -- roslaunch yolo_ros yolo_v5.launch 
+    gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch target_detection yolov8.launch" 
     sleep 2
     gnome-terminal --window -- roslaunch coordinate_system_conversion conversion.launch
     echo -e "All nodes are ready! "
@@ -17,7 +17,7 @@ runing(){
     # 定义一个循环，无限执行，直到按下任意键
     while [ -z "$key" ]; do
         # 用tail和grep命令判断文件的最后一行是否以指定的字符串结尾
-        tail -n 1 ~/.ros/log/latest/yolo_ros* | grep -q "waiting for image form target detect node.$"
+        tail -n 1 ~/.ros/log/latest/target_detection* | grep -q "waiting for image form target detect node.$"
         status1=$?
         tail -n 1 ~/.ros/log/latest/coordinate* | grep -q "waiting for accel info form realsense node.$"
         status2=$?

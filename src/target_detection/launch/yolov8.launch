@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<launch>
+
+  <!-- Load Parameter -->
+  
+  <param name="use_cpu"           value="true" />
+  <param name="use_half"           value="false" />
+
+  <!-- Start yolov5 and ros wrapper -->
+  <node pkg="target_detection" type="yolov8.py" name="target_detection" output="screen" >
+    <param name="weight_path"       value="$(find target_detection)/weights/3i6p_old_800_allp.onnx"/>
+    <param name="color_image_topic"       value="/camera/color/image_raw" />
+    <param name="depth_image_topic"       value="/camera/aligned_depth_to_color/image_raw" />
+    <param name="calibrate_flag"       value="/coordinate_system_conversion/CalibrateFlag" />
+    <param name="pub_topic"         value="/yolov8/Target_Points" />
+    <param name="conf"              value="0.8" />
+  </node>
+
+</launch>

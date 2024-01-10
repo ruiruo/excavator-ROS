@@ -49,6 +49,8 @@ find_package(catkin REQUIRED COMPONENTS
 ## Generate messages in the 'msg' folder
  add_message_files(
   FILES
+  Target_Point.msg
+  Target_Points.msg
   DIRECTORY msg
  )
 
@@ -70,8 +72,6 @@ find_package(catkin REQUIRED COMPONENTS
  generate_messages(
    DEPENDENCIES
    std_msgs
-   Target_Point.msg
-   Target_Points.msg
  )
 
 ################################################
