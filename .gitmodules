@@ -1,6 +1,3 @@
-[submodule "src/target_detection/yolov5_ros/yolov5"]
-	path = src/target_detection/yolo_ros/yolov5
-	url = https://gitee.com/lisq58/yolov5_for_ros.git
 [submodule "src/realsense-ros"]
 	path = src/realsense-ros
 	url = https://gitee.com/lisq58/my_realsense_ros1.git
