@@ -1,3 +1,8 @@
 build/
 devel/
 install/
+logs/
+.vscode/
+.catkin_tools/
+src/.rosinstall
+src/.rosinstall.bak

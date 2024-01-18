@@ -5,3 +5,11 @@
 	path = src/rgbd_launch
 	url = https://gitee.com/lisq58/my_rgbd_launch.git
 	branch = jade-devel
+[submodule "mavros"]
+	path = src/mavros
+	url = https://gitee.com/lisq58/mavros.git
+	branch = melodic-devel
+[submodule "mavlink"]
+	path = src/mavlink
+	url = https://gitee.com/lisq58/mavlink.git
+	branch = melodic-devel
