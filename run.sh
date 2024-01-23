@@ -3,13 +3,13 @@
 
 init(){
     echo -e "All nodes start! "
-    gnome-terminal --window -- roslaunch realsense2_camera rs_rgbd.launch color_width:=640 color_height:=480 depth_width:=640 depth_height:=480 color_fps:=30 depth_fps:=30
+    gnome-terminal --window -- roslaunch realsense2_camera rs_rgbd.launch color_width:=848 color_height:=480 depth_width:=848 depth_height:=480 color_fps:=30 depth_fps:=30
     sleep 2
     gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch target_detection yolov8.launch" 
     sleep 2
-    gnome-terminal --window -- roslaunch coordinate_system_conversion conversion.launch
+    gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch coordinate_transform conversion.launch"
     echo -e "All nodes are ready! "
-    sleep 5
+    sleep 8
 }
 
 runing(){

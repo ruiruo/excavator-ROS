@@ -20,7 +20,7 @@ git clone https://gitee.com/lisq58/excavator_detect.git
 git submodule update --init --recursive
 ```
 
-- 检查[src/realsense-ros]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/rgbd_launch](https://gitee.com/lisq58/excavator_detect/tree/master/src)目录下子模块均有内容即可
+- 检查[src/realsense-ros]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/rgbd_launch](https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/mavlink]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/mavros]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/geometry2]( https://gitee.com/lisq58/excavator_detect/tree/master/src)目录下子模块均有内容即可
 - 阅读[src/realsense-ros/README.md](https://gitee.com/lisq58/my_realsense_ros1/blob/my_realsense_ros1/README.md)安装`ros-melodic-realsense2-camera`与`ros-melodic-realsense2-description`
 
 ```
@@ -38,6 +38,13 @@ rosdep install --from-paths src/mav* --ignore-src -y
 ./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
 ```
 
+- 修改`~/.bashrc`使得其他节点能调用源代码编译的tf2
+
+```
+echo "export PYTHONPATH=$PYTHONPATH:~/workspace/excavator_detect/src" >> ~/.bashrc
+source ~/.bashrc
+```
+
 - 安装python3.8
 
 ```
@@ -50,6 +57,7 @@ sudo apt-get install python3.8 python3-pip
 sudo -H python3.8 -m pip install virtualenv virtualenvwrapper
 sudo rm -rf ~/.cache/pip
 ```
+
 ```
 echo "export WORKON_HOME=$HOME/.virtualenvs" >> ~/.bashrc
 echo "export VIRTUALENVWRAPPER_PYTHON=/usr/bin/python3" >> ~/.bashrc
@@ -72,14 +80,35 @@ pip install ultralytics
 
 - 编译ROS包
 
-    若之前编译出错可修复后，将文件夹`build`与`devel`删除后重新编译
+1. 清除以往的编译文件
 
 ```
 catkin clean
-catkin build -DCATKIN_ENABLE_TESTING=False -DCMAKE_BUILD_TYPE=Release
 ```
 
-### 若在TX2中使用
+2. 使用python3解释器编译在python3环境下运行的节点
+
+```
+catkin build geometry2 coordinate_transform target_detection --cmake-args
+                                -DCMAKE_BUILD_TYPE=Release             
+                                -DPYTHON_EXECUTABLE=/usr/bin/python3             
+                                -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m             
+                                -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
+```
+
+3. 按照realsense官方`README.md`编译realsense相关节点
+
+```
+catkin build realsense2_camera realsense2_description -DCATKIN_ENABLE_TESTING=False -DCMAKE_BUILD_TYPE=Release
+```
+
+4. 编译其余节点
+
+```
+catkin build
+```
+
+#### 若在TX2中使用
 
 - 将`/opt/ros/melodic/share/cv_bridge/cmake/`文件94行最后一个索引改为`/usr/include/opencv4`
 

@@ -13,3 +13,7 @@
 	path = src/mavlink
 	url = https://gitee.com/lisq58/mavlink.git
 	branch = melodic-devel
+[submodule "geometry2"]
+	path = src/geometry2
+	url = https://gitee.com/lisq58/geometry2.git
+	branch = melodic-devel
