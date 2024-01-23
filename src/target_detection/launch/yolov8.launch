@@ -1,20 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <launch>
-
-  <!-- Load Parameter -->
-  
-  <param name="use_cpu"           value="true" />
-  <param name="use_half"           value="false" />
-
-  <!-- Start yolov5 and ros wrapper -->
   <node pkg="target_detection" type="yolov8.py" name="target_detection" output="screen" >
     <param name="weight_path"       value="$(find target_detection)/weights/3i6p_old_800_allp.onnx"/>
     <param name="color_image_topic"       value="/camera/color/image_raw" />
     <param name="depth_image_topic"       value="/camera/aligned_depth_to_color/image_raw" />
-    <param name="calibrate_flag"       value="/coordinate_system_conversion/CalibrateFlag" />
-    <param name="pub_topic"         value="/yolov8/Target_Points" />
-    <param name="conf"              value="0.8" />
+    <param name="pub_topic"         value="/target_detection/Target_Points" />
+    <param name="conf"              value='0.8' /> <!--目标识别置信度-->
+    <param name="half"           value='False' /> <!--使用半浮点数-->
+    <param name="show"           value='True' /> <!--目标识别可视标志位-->
+    <param name="point_search_range"           value='6' /> <!--获取关键点深度的搜索范围，0为关键点坐标处，1为向外围一周，以此类推, 值越大召回率越高准确度越低-->
+    <param name="cpu"           value='True' />
+    <param name="search_num"           value='6' /> <!--用于确定小臂倾角的辅助点个数, 最小值为2最大值为8-->
   </node>
 
 </launch>

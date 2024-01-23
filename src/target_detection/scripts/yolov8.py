@@ -2,48 +2,44 @@
 # -*- coding: utf-8 -*-
 
 import cv2
-import rospy
+from geometry2.tf2_ros.src import tf2_ros
 import numpy as np
-import random
 from ultralytics import YOLO
 
-import message_filters
+import rospy
+import message_filters, std_msgs
 from sensor_msgs.msg import Image
-from target_detection.msg import Target_Point, Target_Points
-from coordinate_system_conversion.msg import  Calibrate_flag
+from target_detection.msg import Box_Point, Target_Points, Key_Point
 
 
 class TargetDetection:
     def __init__(self):
 
-        # load parameters
-        weight_path = rospy.get_param('~weight_path', '')
+        # 加载参数
+        weight_path = rospy.get_param('~weight_path', 
+                                      "$(find target_detection)/weights/yolov8n-pose.onnx")
         color_image_topic = rospy.get_param(
-            '~color_image_topic', '/camera/color/image_raw')
+             '~color_image_topic', '/camera/color/image_raw')
         depth_image_topic = rospy.get_param(
             '~depth_image_topic', '/camera/aligned_depth_to_color/image_raw')
-        calibrate_flag = rospy.get_param('~calibrate_flag', '/coordinate_system_conversion/CalibrateFlag')
-        pub_topic = rospy.get_param('~pub_topic', '/yolov5/Target_Points')
+        pub_topic = rospy.get_param('~pub_topic', '/target_detection/Target_Points')
+        self.half = rospy.get_param('~half', 'False')
         self.conf = rospy.get_param('~conf', '0.5')
 
         self.model = YOLO(weight_path, task='pose')
 
-        # which device will be used
-        if (rospy.get_param('/use_cpu', 'false')):
+        # 选择yolo运行设备与是否使用半浮点
+        if (rospy.get_param('~cpu', 'False')):
             self.device = 'cpu'
         else:
             self.device = '0'
-            if (rospy.get_param('/use_half', 'false')):
-                self.half = True
+            if (rospy.get_param('~half', 'False')):
+                self.half = 'True'
 
+        #realsense相机图像话题订阅
         self.color_image = Image()
         self.depth_image = Image()
         self.getImageSec = rospy.get_rostime()
-        self.calibrate_flag = Calibrate_flag()
-
-        # image subscribe
-        self.calibrate_flag_sub = rospy.Subscriber(calibrate_flag, Calibrate_flag, 
-                                          queue_size=10, callback= self.flag_callback)
         self.color_sub = message_filters.Subscriber(color_image_topic, Image, 
                                           queue_size=1, buff_size=9216000)
         self.depth_sub = message_filters.Subscriber(depth_image_topic, Image,
@@ -51,104 +47,133 @@ class TargetDetection:
         self.ts = message_filters.TimeSynchronizer([self.color_sub, self.depth_sub], 10)
         self.ts.registerCallback(self.image_callback)
 
-        # output publishers
+        self.calibrate_buffer = tf2_ros.Buffer(rospy.Time())
+        self.calibrate_listener = tf2_ros.TransformListener(self.calibrate_buffer)
+
+        #发布检测框与关键点话题
         self.position_pub = rospy.Publisher(pub_topic, Target_Points, queue_size=10)
 
         while (not rospy.is_shutdown()) :
             if(rospy.get_rostime().secs-self.getImageSec.secs > 5):
-                rospy.logwarn_throttle_identical(5,"waiting for image form target detect node.")
+                rospy.logwarn_throttle_identical(20,"waiting for image form target detect node.")
             try:
-                cv2.imshow("YOLOv8 Inference", self.annotated_frame)
-            except:
+                if rospy.get_param('~show', 'False'):
+                    cv2.imshow("yolov8 inf",self.image)
+                    cv2.waitKey(1)
+            except Exception as e:
                 pass
-            cv2.waitKey(1)
-
-    def flag_callback(self,calibrate_flag):
-        self.calibrate_flag.calibrateflag = calibrate_flag.calibrateflag
-        if(self.calibrate_flag.calibrateflag == True):
-            self.calibrate_flag_sub.unregister()
 
     def image_callback(self, color_image, depth_image):
+        #获取相机话题信息并通知
         self.TargetPoints = Target_Points()
         self.TargetPoints.header = color_image.header
         self.getImageSec = rospy.get_rostime()
-        rospy.loginfo_throttle_identical(60,"Get image!")
+        rospy.loginfo_throttle_identical(600,"Get image!")
+
+        #对RGBD相机信息整理与与处理
         self.color_image = np.frombuffer(color_image.data, dtype=np.uint8).reshape(
             color_image.height, color_image.width, -1)
         self.depth_image = np.frombuffer(depth_image.data, dtype=np.uint16).reshape(
        depth_image.height, depth_image.width)
-        
         self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
         self.color_image = cv2.rotate(self.color_image, cv2.ROTATE_90_CLOCKWISE)
-        self.color_image = cv2.resize(self.color_image, (640, 640), interpolation=cv2.INTER_LINEAR)
-        self.yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
-        self.yuv_image[:,:,0] = cv2.equalizeHist(self.yuv_image[:,:,0])
-        self.color_image = cv2.cvtColor(self.yuv_image, cv2.COLOR_YUV2RGB)
+        yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
+        yuv_image[:,:,0] = cv2.equalizeHist(yuv_image[:,:,0])
+        self.color_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2RGB)
         self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
-        print( self.depth_image.shape)
 
-        results = self.model(self.color_image, conf=self.conf, device=self.device, half=self.half)
-        # xmin    ymin    xmax   ymax  confidence  class    name
-        self.annotated_frame = results[0].plot(labels=False, conf=True)
+        #输出模型监测结果，并导出预览图片与整理检测结果
+        results = self.model(self.color_image, conf=self.conf, 
+                             device=self.device, half=self.half)
+        self.image = results[0].plot()
+        boxes = []
+        if results[0].boxes.cls.tolist() is not None:
+            for i in range(len(results[0].boxes.cls.tolist())):
+                names = [results[0].names[int(results[0].boxes.cls[i])]]
+                box_conf = [float(results[0].boxes.conf[i])]
+                box = results[0].boxes.xywh[i].tolist()
+                kp_list = results[0].keypoints.xy[i].tolist()
+                object = names + box_conf + box + kp_list
+                boxes.append(object)
+            self._data_push(boxes)
+        else:
+           rospy.logwarn_throttle_identical(10,"No valid targets detected")
 
-        boxs = results.pandas().xywh[0].values
-        print(boxs)
-        # self.dect( boxs)
-
-    def get_randnum_pos(self, box,depth_data,randnum):
-        distance_list = []
-        mid_pos = [(box[0] + box[2])//2, (box[1] + box[3])//2] #确定索引深度的中心像素位置
-        min_val = min(abs(box[2] - box[0]), abs(box[3] - box[1])) #确定深度搜索范围
-        for i in range(randnum):
-            bias = random.randint(-min_val//4, min_val//4)
-            dist = depth_data[int(mid_pos[1] + bias), int(mid_pos[0] + bias)]
-            if dist:
-                distance_list.append(dist)
-        distance_list = np.array(distance_list)
-        distance_list = np.sort(distance_list)[randnum//2-randnum//4:randnum//2+randnum//4] #冒泡排序+中值滤波
-        return np.round(np.mean(distance_list)/10,4) #距离单位为cm
-
-    def get_mid_pos(self, box, depth_data, step):
-        distance_list = []
-        mid_pos = [(box[0] + box[2])//2, (box[1] + box[3])//2] 
-        min_val = min(abs(box[2] - box[0]), abs(box[3] - box[1])) 
-        bias = min_val if min_val < step else step
-        scope = int(bias**2//1)
-        for i in range(scope):
-            row = int(mid_pos[1] + i - bias*(i//bias)-bias//2)
-            col = int(mid_pos[0] + i//bias-bias//2)
-            dist = depth_data[row, col]
-            if dist:
-                distance_list.append(dist)
-        distance_list = np.array(distance_list)
-        distance_list = np.sort(distance_list)[ scope//2- scope//4: scope//2+ scope//4] 
-        return np.round(np.mean(distance_list)/10,4) 
-    
-    def calibrate_yaw(self, box, depth_data):
-        if(box[-1] != "Calibration-surface"): return
-
-
-    def dect(self, boxs):
-        for box in boxs:
-            #if(not self.calibrate_flag.calibrateflag):
-            if(0):
-                self.calibrate_yaw(box, self.depth_image)
+    def _data_push(self, boxes):
+        for box in boxes:
+            if(not self.calibrate_buffer. can_transform("camera_color_frame", "body",  rospy.Time())):
+                if(box[0] == "Calibration_surface"): 
+                    self._collect_boxes(box[:6])
             else:
-                #distance = self.get_randnum_pos(box, self.depth_image, 10)
-                TargetPoint = Target_Point()
-                TargetPoint.probability = np.float64(box[4])
-                #TargetPoint.distance = np.float64(distance)
-                TargetPoint.x = np.int64(box[0])
-                TargetPoint.y = np.int64(box[1])
-                TargetPoint.width = np.int64(box[2])
-                TargetPoint.height = np.int64(box[3])
-                TargetPoint.Class = box[-1]
-                cv2.rectangle(self.color_image, (int(box[0]), int(box[1])),
-                          (int(box[2]), int(box[3])), [255,255,0], 10)
-                self.TargetPoints.target_points.append(boundingBox)
+                self._collect_boxes(box[:6])
+                self._collect_keypoints(box[6:])
+        self.position_pub.publish(self.TargetPoints)
 
-        self.position_pub.publish(self.boundingBoxes)
+    def _collect_boxes(self, box):
+        BoxPoint = Box_Point()
+        BoxPoint.probability = np.float64(box[1])
+        BoxPoint.distance = np.float64(self._get_forearm_attitude(box))
+        BoxPoint.x = np.int64(box[2])
+        BoxPoint.y = np.int64(box[3])
+        BoxPoint.width = np.int64(box[3])
+        BoxPoint.height = np.int64(box[4])
+        BoxPoint.name = box[0]
+        self.TargetPoints.box_points.append(BoxPoint)
 
+    def _collect_keypoints(self, keypoints):
+        #["A_point", "B_point", "A_down", "B_down", "BF_left", "BF_right"]
+        kp_name = ['A', 'B', 'A_d', 'B_d', 'BF_l', 'BF_r'] 
+        for p in kp_name:
+            KeyPoint = Key_Point()
+            KeyPoint.x = keypoints[kp_name.index(p)][0]
+            KeyPoint.y = keypoints[kp_name.index(p)][1]
+            KeyPoint.distance = self._get_point_distance([int(KeyPoint.x), int(KeyPoint.y)])
+            KeyPoint.name = p
+            if KeyPoint.distance != 0.:
+                self.TargetPoints.key_points.append(KeyPoint)
+
+    def _get_point_distance(self, mid_pos, 
+                                                        search_range=int(rospy.get_param('~point_search_range', '4'))):
+        for scope in range(search_range):
+            if (mid_pos[0] + scope < self.depth_image.shape[1] and 
+                mid_pos[1] + scope < self.depth_image.shape[0]):
+                distance_list = np.array([self.depth_image[int(mid_pos[1]+i)][int(mid_pos[0]+j)]
+                                        for i in range(-scope, scope+1) for j in range(-scope, scope+1)])
+            if np.sum(distance_list) != 0 :
+                break
+        if len(distance_list)>=4:
+            distance_list = np.percentile(distance_list, [25, 50, 75])
+        elif len(distance_list) == 0:
+            return 0. 
+        return np.round(np.mean(distance_list) / 10, 4)#距离单位cm 原始数据单位为0.1mm
+
+    def _get_forearm_attitude(self, box):
+        if box[0] != "Calibration_surface":
+            return 0.
+        mid_pos = [box[2], box[3]] 
+        mid_distance = self._get_point_distance([int(mid_pos[0]), int(mid_pos[1])])
+        search_dis = box[4]/4
+        search_list = [[mid_pos[0],mid_pos[1]],
+                       [mid_pos[0], mid_pos[1] - search_dis],
+                       [mid_pos[0], mid_pos[1] + search_dis],
+                       [mid_pos[0] - search_dis, mid_pos[1] - search_dis],
+                       [mid_pos[0] - search_dis, mid_pos[1] + search_dis],
+                       [mid_pos[0] + search_dis, mid_pos[1] - search_dis],
+                       [mid_pos[0] + search_dis, mid_pos[1] + search_dis],
+                       [mid_pos[0] - search_dis,mid_pos[1]],
+                       [mid_pos[0] + search_dis, mid_pos[1]]]
+        for i in range(rospy.get_param('~search_num', '4')+1):
+            KeyPoint = Key_Point()
+            KeyPoint.x = search_list[i][0]
+            KeyPoint.y = search_list[i][1]
+            KeyPoint.distance = self._get_point_distance([int(KeyPoint.x), int(KeyPoint.y)])
+            if KeyPoint.distance != 0 : 
+                KeyPoint.name = "Calibration_surface_" + str(i)
+                self.TargetPoints.key_points.append(KeyPoint)
+        return mid_distance
+        
+
+ 
 def main():
     rospy.init_node('target_detection', anonymous=True)
     yolo_dect = TargetDetection()
