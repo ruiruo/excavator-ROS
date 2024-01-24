@@ -34,8 +34,9 @@ sudo apt-get install ros-melodic-realsense2-description
 - 安装mavros的依赖与地理列表数据集
 
 ```
+sudo apt-get install ros-melodic-geographic-msgs
 rosdep install --from-paths src/mav* --ignore-src -y
-./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
+sudo ./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
 ```
 
 - 修改`~/.bashrc`使得其他节点能调用源代码编译的tf2
@@ -48,7 +49,7 @@ source ~/.bashrc
 - 安装python3.8
 
 ```
-sudo apt-get install python3.8 python3-pip
+sudo apt-get install python3.8 python3-pip python3.8-dev
 ```
 
 - 创建python3.8虚拟环境
@@ -80,6 +81,10 @@ pip install ultralytics
 
 - 编译ROS包
 
+```
+sudo apt-get install python-catkin-tools
+```
+
 1. 清除以往的编译文件
 
 ```
@@ -89,11 +94,7 @@ catkin clean
 2. 使用python3解释器编译在python3环境下运行的节点
 
 ```
-catkin build geometry2 coordinate_transform target_detection --cmake-args
-                                -DCMAKE_BUILD_TYPE=Release             
-                                -DPYTHON_EXECUTABLE=/usr/bin/python3             
-                                -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m             
-                                -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
+catkin build geometry2 coordinate_transform target_detection --cmake-args -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
 ```
 
 3. 按照realsense官方`README.md`编译realsense相关节点
