@@ -24,11 +24,11 @@ git submodule update --init --recursive
 - 阅读[src/realsense-ros/README.md](https://gitee.com/lisq58/my_realsense_ros1/blob/my_realsense_ros1/README.md)安装`ros-melodic-realsense2-camera`与`ros-melodic-realsense2-description`
 
 ```
-sudo apt-get install ros-melodic-realsense2-camera
+sudo apt-get install ros-melodic-realsense2-camera -y
 ```
 
 ```
-sudo apt-get install ros-melodic-realsense2-description
+sudo apt-get install ros-melodic-realsense2-description -y
 ```
 
 - 安装mavros的依赖与地理列表数据集
@@ -48,7 +48,7 @@ source ~/.bashrc
 - 安装python3.8
 
 ```
-sudo apt-get install python3.8 python3-pip
+sudo apt-get install python3.8 python3-pip -y
 ```
 
 - 创建python3.8虚拟环境
@@ -86,23 +86,27 @@ pip install ultralytics
 catkin clean
 ```
 
-2. 使用python3解释器编译在python3环境下运行的节点
+2. 安装编译的依赖(非虚拟环境编译)
 
 ```
-catkin build geometry2 coordinate_transform target_detection --cmake-args
-                                -DCMAKE_BUILD_TYPE=Release             
-                                -DPYTHON_EXECUTABLE=/usr/bin/python3             
-                                -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m             
-                                -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
+python3.6 -m pip install empy==3.3.4 catkin_pkg 
+sudo apt-get install python-pip
+python2 -m pip insatll empy==3.3.4
 ```
 
-3. 按照realsense官方`README.md`编译realsense相关节点
+3. 使用python3解释器编译在python3环境下运行的节点(不要在虚拟环境编译)
 
 ```
-catkin build realsense2_camera realsense2_description -DCATKIN_ENABLE_TESTING=False -DCMAKE_BUILD_TYPE=Release
+catkin build geometry2 coordinate_transform target_detection --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
 ```
 
-4. 编译其余节点
+4. 按照realsense官方`README.md`编译realsense相关节点
+
+```
+catkin build realsense2_camera realsense2_description   -DCATKIN_ENABLE_TESTING=False   -DCMAKE_BUILD_TYPE=Release
+```
+
+5. 编译其余节点
 
 ```
 catkin build
@@ -113,8 +117,7 @@ catkin build
 - 将`/opt/ros/melodic/share/cv_bridge/cmake/`文件94行最后一个索引改为`/usr/include/opencv4`
 
 ```
-cd /opt/ros/melodic/share/cv_bridge/cmake/
-sudo gedit cv_bridgeConfig.cmake
+sudo gedit /opt/ros/melodic/share/cv_bridge/cmake/cv_bridgeConfig.cmake
 ```
 
 ## 基本用法
