@@ -34,8 +34,9 @@ sudo apt-get install ros-melodic-realsense2-description -y
 - 安装mavros的依赖与地理列表数据集
 
 ```
+sudo apt-get install ros-melodic-geographic-msgs
 rosdep install --from-paths src/mav* --ignore-src -y
-./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
+sudo ./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
 ```
 
 - 修改`~/.bashrc`使得其他节点能调用源代码编译的tf2
@@ -48,7 +49,11 @@ source ~/.bashrc
 - 安装python3.8
 
 ```
+<<<<<<< HEAD
 sudo apt-get install python3.8 python3-pip -y
+=======
+sudo apt-get install python3.8 python3-pip python3.8-dev
+>>>>>>> 930d48984b2c21563cf3a319b38ffe83abacd77c
 ```
 
 - 创建python3.8虚拟环境
@@ -79,6 +84,10 @@ pip install ultralytics
 ```
 
 - 编译ROS包
+
+```
+sudo apt-get install python-catkin-tools
+```
 
 1. 清除以往的编译文件
 
