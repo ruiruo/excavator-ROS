@@ -19,4 +19,4 @@
 	branch = melodic-devel
 [submodule "vicon_bridge"]
 	path = src/vicon_bridge
-	url = https://gitee.com/lisq58/excavator_detect.git
+	url = https://gitee.com/lisq58/vicon-bridge.git
