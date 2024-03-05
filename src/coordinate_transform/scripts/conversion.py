@@ -36,7 +36,7 @@ class Coordinate_Point:
         self.get_sub_time = [rospy.get_rostime(),rospy.get_rostime()]
         self.K = np.eye(3)
         self.calibration_level_matrix = np.eye(3)
-        self.calibrate_array = np.array([[0],[0],[0]],dtype=np.float64)
+        self.calibrate_array = np.empty((3,0),dtype=np.float64)
 
         #相机内参获取定时器
         self.cam_info_rate = rospy.Rate(1.)
@@ -56,10 +56,10 @@ class Coordinate_Point:
 
         #订阅话题健康检查
         while(not rospy.is_shutdown() ):
-            if(rospy.get_rostime().secs - self.get_sub_time[0].secs > 5 ):
-                rospy.logwarn_throttle_identical(60,"waiting for target detect form yolo node.")
+            if(rospy.get_rostime().secs - self.get_sub_time[0].secs > 10 ):
+                rospy.logwarn_throttle_identical(60,"Waiting for target detect form yolo node.")
             if(rospy.get_rostime().secs - self.get_sub_time[1].secs > 2 ):
-                rospy.logwarn_throttle_identical(20,"waiting for accel info form realsense node.")
+                rospy.logwarn_throttle_identical(20,"Waiting for accel info form realsense node.")
 
     #将校正后得到的相机外参作用于关键点并发布
     def conversion_callback(self, TargetPoints):
@@ -69,15 +69,17 @@ class Coordinate_Point:
             self.coordinate_points = Coordinate_points()
             self.coordinate_points.header = TargetPoints.header
             inv_K = np.linalg.inv(self.K) 
-            for box in TargetPoints.key_points:
+            for p in TargetPoints.key_points:
                 coordinate_point = Coordinate_point()
-                coordinate_point.name = box.name
-                point = np.array([[box.x], [box.y], [1]])
-                point= np.dot(box.distance * inv_K , point)
+                coordinate_point.name = p.name
+                point = np.array([[p.x], [p.y], [1]])
+                point= np.dot(p.distance * inv_K , point)
                 point[[1, 2]] = point[[2, 1]]
-                #x,y,z 右 前 上
+                #x,y,z 下 前 左
                 coordinate_point.x, coordinate_point.y, coordinate_point.z = np.dot(
-                    point.T,self.R_color_to_body.as_matrix()).T
+                    point.T,self.R_color_to_body.as_matrix()).T[[1, 2, 0]]
+                coordinate_point.y = -coordinate_point.y
+                #x,y,z 前 右 下
                 self.coordinate_points.coordinate_points.append( coordinate_point)
             self.position_pub.publish(self.coordinate_points)
 
@@ -110,14 +112,15 @@ class Coordinate_Point:
                     self.accel_transform = self.conversion_buffer.lookup_transform("camera_link", "camera_accel_frame",  
                                                                         rospy.Time())
                     self._calibrate()
+                else:
+                    rospy.logwarn_throttle_identical(20,"Check if necessary tf exists.")
 
     #获取加速度计读数
     def _collect_accel_info(self, info):
         #accel_info.linear_acceleration.x,y,z 东 天 北 eun
         xyz = np.array([[info.linear_acceleration.x], [info.linear_acceleration.y], [info.linear_acceleration.z]], 
                        dtype=np.float64)
-        if np.sum(xyz) != 0:
-            self.calibrate_array = np.concatenate([self.calibrate_array, xyz], axis=1)
+        self.calibrate_array = np.hstack((self.calibrate_array, xyz))
 
     #外参旋转矩阵获取
     def _calibrate(self):
@@ -130,7 +133,7 @@ class Coordinate_Point:
                                                 math.sqrt(calibrate_angle[0]**2 + calibrate_angle[2]**2) 
                                                 if calibrate_angle[0]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
         yaw = -np.einsum('i->', np.percentile(self.yaw_list, [25, 50, 75])) / 3.
-        self.calibrate_array = np.array([[0],[0],[0]],dtype=np.float64)
+        self.calibrate_array = np.empty((3,0),dtype=np.float64)
         self.yaw_list = []
         rospy.loginfo("Calibration successful! ")
         rospy.loginfo("pitch = %2f  roll = %2f yaw = %2f", pitch, roll, yaw)
@@ -138,27 +141,25 @@ class Coordinate_Point:
 
     #通过小臂校正面获取彩色相机和集体的yaw偏差
     def _get_yaw(self):
-        inv_K = np.linalg.inv(self.K) 
+        inv_K = np.linalg.inv(self.K)
+        calibration_reference = rospy.get_param('~calibration_reference', '100')
         point_list = [np.dot(point.distance * inv_K, np.hstack([point.x, point.y, 1])) 
-                      for point in self.TargetPoints.key_points 
-                      if point.name.startswith("Calibration_surface") and
-                      point.distance <= rospy.get_param('~calibration_reference', '100')] 
-        #未获取到有效个数的参考点时退出
-        if np.sum(point_list)>50000 or np.size(point_list)<3:
+                    for point in self.TargetPoints.key_points 
+                    if point.name.startswith("Calibration_surface") and
+                    point.distance <= calibration_reference]
+
+        if np.sum(point_list) > 50000 or len(point_list) < 3:
             return False
 
-        yaw_vector_list = []
-        surface_list = list(combinations(point_list, 3))
-        for surface  in surface_list:
-            v1 = surface[1] - surface[0]
-            v2 = surface[2] - surface[0]
-            yaw_vector = np.cross(v1, v2)
-            if not np.allclose(yaw_vector, 0) and np.linalg.norm(yaw_vector) != 0:
-                yaw_vector_list.append(yaw_vector / np.linalg.norm(yaw_vector))
-                
+        point_array = np.array(point_list)
+        surface_list = list(combinations(point_array, 3))
+        yaw_vector_list = [np.cross(surface[1] - surface[0], surface[2] - surface[0]) 
+                        for surface in surface_list]
+        yaw_vector_list = [v / np.linalg.norm(v) for v in yaw_vector_list if np.linalg.norm(v) > 0]
+
+        norm_z = np.linalg.norm([0, 0, 1])
         for vector in yaw_vector_list:
-            if np.linalg.norm(vector) * np.linalg.norm([0, 0, 1]) == 0: continue
-            cos_angle = np.dot(vector, [0, 0, 1]) / (np.linalg.norm(vector) * np.linalg.norm([0, 0, 1]))
+            cos_angle = np.dot(vector, [0, 0, 1]) / (np.linalg.norm(vector) * norm_z)
             yaw = np.degrees(np.arccos(cos_angle))
             self.yaw_list.append(yaw)
         return True
@@ -172,7 +173,7 @@ class Coordinate_Point:
         R_body_to_camera_yaw = R_body_to_color_yaw * R_camera_to_color 
         # 加速度计坐标到相机坐标系仅有平移关系
         R_world_to_accel = R.from_euler('XYZ', [pitch, roll, 0], degrees=True)
-        #缺少body与world的旋转矩阵
+        #缺少body与world的旋转矩阵 yaw直接参考机体 roll与pitch参考世界坐标系
         self.R_color_to_body = ((R_world_to_accel * R_body_to_camera_yaw).inv())
         # print(self.R_color_to_body.as_euler('XYZ', degrees=True))
         self.color_cam_to_body_tf.header.frame_id = "camera_color_frame"
