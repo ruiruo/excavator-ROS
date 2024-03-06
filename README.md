@@ -6,7 +6,7 @@
 
 - Ubuntu 18.04
 - [ROS melodic](http://wiki.ros.org/cn/melodic/Installation/Ubuntu)
-- Python3.8与2.7环境，PyTorch == 1.10.0([Jetson TX2安装方法](https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048))
+- Python3.8与2.7环境，PyTorch == 1.10.0([Jetson TX2安装方法](https://zhuanlan.zhihu.com/p/55509535), [Pytorch源代码](https://github.com/pytorch/pytorch/tree/v1.10.0), [torchvision](https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048))
 
 ## 代码下载与配置
 
@@ -20,21 +20,12 @@ git clone https://gitee.com/lisq58/excavator_detect.git
 git submodule update --init --recursive
 ```
 
-- 检查[src/realsense-ros]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/rgbd_launch](https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/mavlink]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/mavros]( https://gitee.com/lisq58/excavator_detect/tree/master/src) , [src/geometry2]( https://gitee.com/lisq58/excavator_detect/tree/master/src)目录下子模块均有内容即可
-- 阅读[src/realsense-ros/README.md](https://gitee.com/lisq58/my_realsense_ros1/blob/my_realsense_ros1/README.md)安装`ros-melodic-realsense2-camera`与`ros-melodic-realsense2-description`
-
-```
-sudo apt-get install ros-melodic-realsense2-camera -y
-```
-
-```
-sudo apt-get install ros-melodic-realsense2-description -y
-```
+- 检查 [src/mavlink, src/mavros, src/geometry2, src/vicon_bridge]( https://gitee.com/lisq58/excavator_detect/tree/master/src)目录下子模块均有内容即可
 
 - 安装mavros的依赖与地理列表数据集
 
 ```
-sudo apt-get install ros-melodic-geographic-msgs
+sudo apt-get install ros-melodic-geographic-msgs -y
 rosdep install --from-paths src/mav* --ignore-src -y
 sudo ./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
 ```
@@ -49,11 +40,7 @@ source ~/.bashrc
 - 安装python3.8
 
 ```
-<<<<<<< HEAD
 sudo apt-get install python3.8 python3-pip -y
-=======
-sudo apt-get install python3.8 python3-pip python3.8-dev
->>>>>>> 930d48984b2c21563cf3a319b38ffe83abacd77c
 ```
 
 - 创建python3.8虚拟环境
@@ -86,7 +73,7 @@ pip install ultralytics
 - 编译ROS包
 
 ```
-sudo apt-get install python-catkin-tools
+sudo apt-get install python-catkin-tools -y
 ```
 
 1. 清除以往的编译文件
@@ -95,7 +82,7 @@ sudo apt-get install python-catkin-tools
 catkin clean
 ```
 
-2. 安装编译的依赖(非虚拟环境编译)
+2. 安装编译的依赖(非虚拟环境)
 
 ```
 python3.6 -m pip install empy==3.3.4 catkin_pkg 
@@ -109,13 +96,7 @@ python2 -m pip insatll empy==3.3.4
 catkin build geometry2 coordinate_transform target_detection --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
 ```
 
-4. 按照realsense官方`README.md`编译realsense相关节点
-
-```
-catkin build realsense2_camera realsense2_description   -DCATKIN_ENABLE_TESTING=False   -DCMAKE_BUILD_TYPE=Release
-```
-
-5. 编译其余节点
+4. 编译其余节点
 
 ```
 catkin build

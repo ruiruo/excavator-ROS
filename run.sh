@@ -17,7 +17,7 @@ runing(){
         echo -e "Runing... "
         # 用read命令读取标准输入，-t选项表示超时时间，-n选项表示字符数，-s选项表示静默模式
         # 如果在10秒内输入了一个字符，那么赋值给key变量，否则赋值为空
-        read -p "Press any key to exit..." -t 20 -n 1 -s key 
+        read -p "Press any key to exit..." -t 120 -n 1 -s key 
         if [ -z "$key" ]; then
             echo " "
         fi

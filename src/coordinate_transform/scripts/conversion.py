@@ -56,12 +56,15 @@ class Coordinate_Point:
             if(not self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time())):
                 rospy.loginfo_throttle_identical(120,
                                                 "Calibrating...\n Do not move the camera and the devices rigidly connected to it!!!")
-                frames = accel_pipeline.wait_for_frames()
-                accel_frame = frames.first_or_default(rs.stream.accel)
-                if accel_frame:
-                    accel_data = accel_frame.as_motion_frame().get_motion_data()
-                    xyz = np.array([[accel_data.x], [accel_data.y], [accel_data.z]], dtype=np.float64)
-                    self.calibrate_array = np.hstack((self.calibrate_array, xyz))
+                try:
+                    frames = accel_pipeline.wait_for_frames()
+                    accel_frame = frames.first_or_default(rs.stream.accel)
+                    if accel_frame:
+                        accel_data = accel_frame.as_motion_frame().get_motion_data()
+                        xyz = np.array([[accel_data.x], [accel_data.y], [accel_data.z]], dtype=np.float64)
+                        self.calibrate_array = np.hstack((self.calibrate_array, xyz))
+                except Exception as e:
+                    rospy.logwarn_throttle_identical(60,"Unable to obtain camera accelerometer data, check if camera is working.")
         accel_pipeline.stop()
 
     #将校正后得到的相机外参作用于关键点并发布
@@ -162,13 +165,12 @@ class Coordinate_Point:
             cos_angle = np.dot(vector, [0, 0, 1]) / (np.linalg.norm(vector) * norm_z)
             yaw = np.degrees(np.arccos(cos_angle))
             yaw_list.append(int(yaw))
-        draw_histogram(yaw_list)
-        
-
+        # draw_histogram(yaw_list)
+            
         self.yaw.append(-np.einsum('i->', np.percentile(yaw_list, [25, 50, 75])) / 3.)
-        # if len(self.yaw) > 3:
-        #     if np.std(self.yaw[-3:]) < 0.01:  
-                # return True
+        if len(self.yaw) > 3:
+            if np.std(self.yaw[-3:]) < 0.01:  
+                return True
         return False
 
     def _color_to_body_coordinate_system(self, pitch, roll, yaw):

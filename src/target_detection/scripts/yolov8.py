@@ -54,47 +54,49 @@ class TargetDetection:
                     cv2.waitKey(1)
             except Exception as e:
                 pass
-
-            frames = pipeline.wait_for_frames()
-            aligned_frames = align.process(frames)
-            aligned_depth_frame = aligned_frames.get_depth_frame()
-            color_frame = aligned_frames.get_color_frame()
-
-            if  aligned_depth_frame and color_frame:
-                getImageSec = rospy.get_rostime()
-                rospy.loginfo_throttle_identical(600,"Get image!")
-                self.TargetPoints = Target_Points()
-                self.TargetPoints.header.stamp = rospy.Time.now()
-                self.seq=+1
-                self.TargetPoints.header.seq = self.seq
-                self.TargetPoints.header.frame_id = "camera_color_frame"
-
-                self.depth_image = np.asanyarray(aligned_depth_frame.get_data())
-                color_image = np.asanyarray(color_frame.get_data())
-                # color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-                color_image = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
-                self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
-
-                #输出模型监测结果，并导出预览图片与整理检测结果
-                # yolov8-pose (half) spend about 100-125ms on TX2
-                results = self.model(color_image, conf=self.conf, device=self.device, half=self.half)
-                # yolov8-pose plot spend about 25-35ms on TX2
-                image = results[0].plot()
-
-                if any(results[0].boxes.cls):
-                    boxes = [
-                        [results[0].names[int(cls)]] + [float(conf)] + xywh.tolist() + keypoints_xy.tolist()
-                        for cls, conf, xywh, keypoints_xy in zip(
-                            results[0].boxes.cls,
-                            results[0].boxes.conf,
-                            results[0].boxes.xywh,
-                            results[0].keypoints.xy)]
-                    self._data_push(boxes)#spend 2ms
-                else:
-                    rospy.logwarn_throttle_identical(10,"No valid targets detected")
             
-            if(rospy.get_rostime().secs - getImageSec.secs > 5):
-                rospy.logwarn_throttle_identical(20,"Waiting for image form target detect node.")
+            try:
+                frames = pipeline.wait_for_frames()
+                aligned_frames = align.process(frames)
+                aligned_depth_frame = aligned_frames.get_depth_frame()
+                color_frame = aligned_frames.get_color_frame()
+
+                if  aligned_depth_frame and color_frame:
+                    getImageSec = rospy.get_rostime()
+                    rospy.loginfo_throttle_identical(600,"Get image!")
+                    self.TargetPoints = Target_Points()
+                    self.TargetPoints.header.stamp = rospy.Time.now()
+                    self.seq=+1
+                    self.TargetPoints.header.seq = self.seq
+                    self.TargetPoints.header.frame_id = "camera_color_frame"
+
+                    self.depth_image = np.asanyarray(aligned_depth_frame.get_data())
+                    color_image = np.asanyarray(color_frame.get_data())
+                    color_image = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
+                    self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
+
+                    #输出模型监测结果，并导出预览图片与整理检测结果
+                    # yolov8-pose (half) spend about 100-125ms on TX2
+                    results = self.model(color_image, conf=self.conf, device=self.device, half=self.half)
+                    # yolov8-pose plot spend about 25-35ms on TX2
+                    image = results[0].plot()
+
+                    if any(results[0].boxes.cls):
+                        boxes = [
+                            [results[0].names[int(cls)]] + [float(conf)] + xywh.tolist() + keypoints_xy.tolist()
+                            for cls, conf, xywh, keypoints_xy in zip(
+                                results[0].boxes.cls,
+                                results[0].boxes.conf,
+                                results[0].boxes.xywh,
+                                results[0].keypoints.xy)]
+                        self._data_push(boxes)#spend 2ms
+                    else:
+                        rospy.logwarn_throttle_identical(10,"No valid targets detected")
+                
+                if(rospy.get_rostime().secs - getImageSec.secs > 15):
+                    rospy.logwarn_throttle_identical(20,"Waiting for image form target detect node.")
+            except Exception as e:
+                rospy.logwarn_throttle_identical(60,"Unable to obtain camera image data, check if camera is working.")
         pipeline.stop()
         cv2.destroyAllWindows()
 
