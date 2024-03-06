@@ -25,7 +25,7 @@ class Coordinate_Point:
         self.TargetPoints = Target_Points()
         self.cam_broadcaster = tf2_ros.StaticTransformBroadcaster()
         self.color_cam_to_body_tf = TransformStamped()
-        self.yaw_list = []
+        self.yaw = []
 
         self.get_sub_time = [rospy.get_rostime(),rospy.get_rostime()]
         # 彩色相机内参按照图片旋转90度变换
@@ -103,7 +103,7 @@ class Coordinate_Point:
         pitch =  90. + math.degrees(math.atan(calibrate_angle[1] / 
                                                 math.sqrt(calibrate_angle[0]**2 + calibrate_angle[2]**2) 
                                                 if calibrate_angle[0]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
-        yaw = -np.einsum('i->', np.percentile(self.yaw_list, [25, 50, 75])) / 3.
+        yaw = np.round(np.mean(self.yaw), 4)
         self.calibrate_array = np.empty((3,0),dtype=np.float64)
         self.yaw_list = []
         rospy.loginfo("Calibration successful! ")
@@ -112,6 +112,35 @@ class Coordinate_Point:
 
     #通过小臂校正面获取彩色相机和集体的yaw偏差
     def _get_yaw(self):
+        def draw_histogram(data):
+            from collections import Counter
+            import matplotlib
+            matplotlib.use('TkAgg')
+            import matplotlib.pyplot as plt
+            from PIL import Image
+            def show_plot():
+                try:
+                    if self.img is not None:
+                        self.img.close()
+                except Exception as e:
+                    print(f'关闭图像时出错: {e}')
+                self.img = Image.open('plot.png')
+                self.img.show()
+            if not all(isinstance(n, int) for n in data):
+                raise ValueError('数据列表必须只包含整数')
+
+            plt.clf()
+
+            data_counts = Counter(data)
+            top_three = data_counts.most_common(3)
+
+            plt.hist(data, bins=range(min(data), max(data) + 2), align='left', color='blue', edgecolor='black')
+            for value, count in top_three:
+                plt.text(value, count, f'{value}')
+            plt.savefig('plot.png')
+            show_plot()
+
+        yaw_list=[]
         inv_K = np.linalg.inv(self.K)
         calibration_reference = rospy.get_param('~calibration_reference', '100')
         point_list = [np.dot(point.distance * inv_K, np.hstack([point.x, point.y, 1])) 
@@ -132,8 +161,15 @@ class Coordinate_Point:
         for vector in yaw_vector_list:
             cos_angle = np.dot(vector, [0, 0, 1]) / (np.linalg.norm(vector) * norm_z)
             yaw = np.degrees(np.arccos(cos_angle))
-            self.yaw_list.append(yaw)
-        return True
+            yaw_list.append(int(yaw))
+        draw_histogram(yaw_list)
+        
+
+        self.yaw.append(-np.einsum('i->', np.percentile(yaw_list, [25, 50, 75])) / 3.)
+        # if len(self.yaw) > 3:
+        #     if np.std(self.yaw[-3:]) < 0.01:  
+                # return True
+        return False
 
     def _color_to_body_coordinate_system(self, pitch, roll, yaw):
         R_body_to_color_yaw = R.from_euler('XYZ', [0, 0, yaw], degrees=True)

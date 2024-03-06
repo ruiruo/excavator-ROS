@@ -148,7 +148,7 @@ class TargetDetection:
             return 0.
         mid_pos = [int(box[2]), int(box[3])]
         mid_distance = self._get_point_distance(mid_pos)
-        search_dis = box[4]/4
+        search_dis = int(box[4]/4)
         search_offsets = [0, -search_dis, search_dis]
         search_list = [(mid_pos[0] + dx, mid_pos[1] + dy)
                     for dx in search_offsets for dy in search_offsets]

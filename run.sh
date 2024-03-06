@@ -14,17 +14,7 @@ runing(){
     key=""
     # 定义一个循环，无限执行，直到按下任意键
     while [ -z "$key" ]; do
-        # 用tail和grep命令判断文件的最后一行是否以指定的字符串结尾
-        tail -n 1 ~/.ros/log/latest/target_detection* | grep -q "Waiting for image form target detect node.$"
-        status1=$?
-        tail -n 1 ~/.ros/log/latest/coordinate* | grep -q "Waiting for accel info form realsense node.$"
-        status2=$?
-        if [ $status1 -eq 0 ] || [ $status2 -eq 0 ]; then
-            echo -e "Restart  realsense2_camera..."
-            rosservice call /camera/realsense2_camera/reset
-        else
-            echo -e "Runing... "
-        fi
+        echo -e "Runing... "
         # 用read命令读取标准输入，-t选项表示超时时间，-n选项表示字符数，-s选项表示静默模式
         # 如果在10秒内输入了一个字符，那么赋值给key变量，否则赋值为空
         read -p "Press any key to exit..." -t 20 -n 1 -s key 

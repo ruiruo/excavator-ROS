@@ -8,7 +8,7 @@
     <param name="half"           value='False' /> <!--使用半浮点数-->
     <param name="point_search_range"           value='6' /> <!--获取关键点深度的搜索范围，0为关键点坐标处，1为向外围一周，以此类推, 值越大召回率越高准确度越低-->
     <param name="cpu"           value='True' />
-    <param name="search_num"           value='6' /> <!--用于确定小臂倾角的辅助点个数, 最小值为2最大值为8-->
+    <param name="search_num"           value='6' /> <!--用于确定小臂倾角的辅助点个数, 最小值为5最大值为8-->
   </node>
 
 </launch>
