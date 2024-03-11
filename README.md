@@ -64,10 +64,10 @@ virtualenv path/to/virtualenvname -p path/to/python3
 source path/to/vitualenvname/bin/activate
 ```
 
-- 在虚拟环境中安装ultralytics
+- 在虚拟环境中安装ultralytics与pyrealsense2
 
 ```
-pip install ultralytics
+pip install ultralytics pyrealsense2
 ```
 
 - 编译ROS包
@@ -93,7 +93,7 @@ python2 -m pip insatll empy==3.3.4
 3. 使用python3解释器编译在python3环境下运行的节点(不要在虚拟环境编译)
 
 ```
-catkin build geometry2 coordinate_transform target_detection --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
+catkin build geometry2 target_detection --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
 ```
 
 4. 编译其余节点

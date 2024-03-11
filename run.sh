@@ -3,14 +3,12 @@
 
 init(){
     echo -e "All nodes start! "
-    gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch coordinate_transform conversion.launch"
-    sleep 3
     gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch target_detection yolov8.launch" 
-    echo -e "All nodes are ready! "
     sleep 8
 }
 
 runing(){
+    echo -e "All nodes are ready! "
     key=""
     # 定义一个循环，无限执行，直到按下任意键
     while [ -z "$key" ]; do
