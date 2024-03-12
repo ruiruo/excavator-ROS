@@ -50,8 +50,10 @@ class TargetDetection:
         self.seq = 0
         self.start_time = rospy.get_rostime()
         # 彩色相机内参按照图片旋转90度变换
-        self.K = np.array([[608.38751221, 0., 233.09431458], 
+        K = np.array([[608.38751221, 0., 233.09431458], 
                            [  0., 608.90325928, 411.84860229],[  0., 0., 1., ]], dtype=np.float64)
+        self.inv_K = np.linalg.inv(K) 
+        self.norm_z = np.linalg.norm([0, 0, 1])
         self.calibration_level_matrix = np.eye(3)
         self.calibrate_array = np.empty((3,0), dtype=np.float64)
         self.calibrate_array_size = 1.
@@ -77,7 +79,7 @@ class TargetDetection:
         #发布检测框与关键点话题
         self.position_pub = rospy.Publisher(pub_topic, Coordinate_points, queue_size=10)
 
-        # 子进程用于接受加速度计数据
+        # 子线程用于接受加速度计数据
         accel_receive = threading.Event()
         accel_receive.set()
         frames = pipeline.wait_for_frames()
@@ -92,11 +94,10 @@ class TargetDetection:
                 frames = pipeline.wait_for_frames()
                 self.get_image_and_predict(frames, align)
 
-                # 通过小臂校正面获取彩色相机和集体的yaw偏差
+                # 通过小臂校正面获取彩色相机和集体的yaw偏差 耗时9ms
                 get_yaw = self._get_yaw()
 
                 # 将校正后得到的相机外参用于关键点转换
-                print(self.calibrate_array_size, get_yaw)
                 if((self.calibrate_array_size >= 250) and get_yaw and
                     (not self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()))):
                     self._calibrate()
@@ -106,7 +107,7 @@ class TargetDetection:
                     self.calibrate_array_size = 1.
                     self.yaw_list = []
 
-                # 使用相机外参对关键点转换并发布
+                # 使用相机外参对关键点转换并发布 耗时2-4ms
                 if self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time()):
                     self._transform_kp()
                     self.position_pub.publish(self.coordinate_points)
@@ -118,6 +119,7 @@ class TargetDetection:
 
     # RGBD数据预处理与YOLO推理
     def get_image_and_predict(self, frames, align):
+        # 图像获取与预处理12ms 主要为旋转耗时8ms
         aligned_frames = align.process(frames)
         aligned_depth_frame = aligned_frames.get_depth_frame()
         color_frame = aligned_frames.get_color_frame()
@@ -136,7 +138,7 @@ class TargetDetection:
             color_image = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
             self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
 
-            #输出模型监测结果，并导出预览图片与整理检测结果
+            #输出模型监测结果，并导出预览图片与整理检测结果 使用engine half耗时39-44ms
             results = self.model(color_image, conf=self.conf, device=self.device, half=self.half)
 
             if self.show:
@@ -148,6 +150,7 @@ class TargetDetection:
                 except Exception as e:
                     pass
 
+            # 数据整理与处理9-12ms 整理耗时约7ms
             if any(results[0].boxes.cls):
                 boxes = [
                     [results[0].names[int(cls)]] + [float(conf)] + xywh.tolist() + keypoints_xy.tolist()
@@ -182,13 +185,12 @@ class TargetDetection:
                 break
 
     # 将关键点坐标通过(彩色相机->机体)旋转矩阵进行变换
-    def _transform_kp(self):
-        inv_K = np.linalg.inv(self.K) 
+    def _transform_kp(self): 
         for p in self.TargetPoints.key_points:
             coordinate_point = Coordinate_point()
             coordinate_point.name = p.name
             point = np.array([[p.x], [p.y], [1]])
-            point= np.dot(p.distance * inv_K , point)
+            point= np.dot(p.distance * self.inv_K , point)
             point[[1, 2]] = point[[2, 1]]
             #x,y,z 下 前 左
             coordinate_point.x, coordinate_point.y, coordinate_point.z = np.dot(
@@ -294,7 +296,7 @@ class TargetDetection:
                     if self.img is not None:
                         self.img.close()
                 except Exception as e:
-                    print(f'关闭图像时出错: {e}')
+                    rospy.logwarn(f'关闭图像时出错: {e}')
                 self.img = Image.open('plot.png')
                 self.img.show()
             if not all(isinstance(n, int) for n in data):
@@ -312,13 +314,12 @@ class TargetDetection:
             show_plot()
 
         yaw_list=[]
-        inv_K = np.linalg.inv(self.K)
-        point_list = [np.dot(point.distance * inv_K, np.hstack([point.x, point.y, 1])) 
+        point_list = [point.distance * self.inv_K @ np.hstack([point.x, point.y, 1]) 
                     for point in self.TargetPoints.key_points 
                     if point.name.startswith("Calibration_surface") and
                     point.distance <= self.calibration_reference]
 
-        if np.sum(point_list) > 50000 or len(point_list) < 3:
+        if  len(point_list) < 3:
             return False
 
         point_array = np.array(point_list)
@@ -327,11 +328,8 @@ class TargetDetection:
                         for surface in surface_list]
         yaw_vector_list = [v / np.linalg.norm(v) for v in yaw_vector_list if np.linalg.norm(v) > 0]
 
-        norm_z = np.linalg.norm([0, 0, 1])
-        for vector in yaw_vector_list:
-            cos_angle = np.dot(vector, [0, 0, 1]) / (np.linalg.norm(vector) * norm_z)
-            yaw = np.degrees(np.arccos(cos_angle))
-            yaw_list.append(int(yaw))
+        yaw_list = [np.degrees(np.arccos(v @ [0, 0, 1] / (np.linalg.norm(v) * self.norm_z)))
+                    for v in yaw_vector_list]
         
         if self.debug:
             draw_histogram(yaw_list)
@@ -372,7 +370,7 @@ class TargetDetection:
             self.start_time = rospy.get_rostime()
         if key == 2:
             time1 = (rospy.get_rostime().secs - self.start_time.secs)*1000 + (rospy.get_rostime().nsecs - self.start_time.nsecs)/1000000
-            print(time1, "ms")
+            rospy.loginfo(time1, "ms")
 
  
 def main():
