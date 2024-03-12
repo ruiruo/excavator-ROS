@@ -22,6 +22,7 @@ runing(){
         trap key=1 SIGINT SIGTERM
     done
     echo " "
+    rosnode kill target_detection
 }
 
 exit(){
