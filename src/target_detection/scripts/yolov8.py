@@ -55,8 +55,8 @@ class TargetDetection:
         self.seq = 0
         self.start_time = rospy.get_rostime()
         # 彩色相机内参按照图片旋转90度变换
-        K = np.array([[608.38751221, 0., 233.09431458], 
-                           [  0., 608.90325928, 411.84860229],[  0., 0., 1., ]], dtype=np.float64)
+        K = np.array([[622.461673, 0., 225.527207], 
+                           [  0., 620.817214, 418.324731],[  0., 0., 1., ]], dtype=np.float64)
         self.inv_K = np.linalg.inv(K) 
         self.norm_z = np.linalg.norm([0, 0, 1])
         self.calibration_level_matrix = np.eye(3)
