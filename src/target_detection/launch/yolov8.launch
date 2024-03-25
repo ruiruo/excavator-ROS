@@ -3,16 +3,13 @@
 <launch>
   <node pkg="target_detection" type="yolov8.py" name="target_detection" output="screen" >
     <param name="weight_path"       value="$(find target_detection)/weights/3i6p_old_800_allp.onnx"/>
-    <param name="pub_topic"         value="/target_detection/Target_Points" />
     <param name="conf"              value='0.8' /> <!--目标识别置信度-->
     <param name="half"           value='False' /> <!--使用半浮点数-->
     <param name="point_search_range"           value='6' /> <!--获取关键点深度的搜索范围，0为关键点坐标处，1为向外围一周，以此类推, 值越大召回率越高准确度越低-->
     <param name="cpu"           value='True' />
     <param name="show"           value='True' />
-    <param name="search_num"           value='6' /> <!--用于确定小臂倾角的辅助点个数, 最小值为5最大值为8-->
     <param name="coordinate_information_topic"       value="/target_detection/Target_Points" />
     <param name="pub_topic"         value="/coordinate_transform/CoordinatePoint" />
-    <param name="calibration_reference"           value='100' /> <!--填入挖掘机机体包括工作装置的长度，辅助提高校准姿态的精确度-->
     <param name="debug"           value='False' />
   </node>
 
