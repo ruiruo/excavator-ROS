@@ -52,11 +52,6 @@ find_package(catkin REQUIRED COMPONENTS
 ## Generate messages in the 'msg' folder
  add_message_files(
   FILES
-  Box_Point.msg
-  Target_Points.msg
-  Key_Point.msg
-  Coordinate_point.msg
-  Coordinate_points.msg
   DIRECTORY msg
  )
 
