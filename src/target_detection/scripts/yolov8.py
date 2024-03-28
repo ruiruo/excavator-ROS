@@ -91,7 +91,7 @@ class TargetDetection:
 
         # 主循环
         while not rospy.is_shutdown() :
-            # try:
+            try:
             # 图像获取与预处理12ms 主要为旋转耗时8ms
                 frames = self.pipeline.wait_for_frames()
                 aligned_frames = align.process(frames)
@@ -128,9 +128,9 @@ class TargetDetection:
                 if self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time()):
                     self._transform_kp()
                     self.position_pub.publish(self.coordinate_points)
-            # except Exception as e:
-            #     rospy.logwarn_throttle_identical(60,\
-            #                                      "Unable to obtain camera image data, check if camera is working.")
+            except Exception as e:
+                rospy.logwarn_throttle_identical(60,\
+                                                 "Unable to obtain camera image data, check if camera is working.")
         self.pipeline.stop()
         cv2.destroyAllWindows()
 
@@ -169,12 +169,16 @@ class TargetDetection:
                     if tag.tag_family == b'tag36h11' and tag.tag_id == 5:
                         angle_degrees = np.empty((1,0))
                         num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
-                        for ns in Ns:
-                            ns = np.array([0, ns[1][0], ns[2][0]])
-                            ns_norm = np.linalg.norm(ns)
-                            angle_radians = np.degrees(np.arccos(np.dot(ns, self.norm_y) / ns_norm))
+                        for N in Ns:
+                            N = np.array([0, N[1][0], N[2][0]])
+                            N_norm = np.linalg.norm(N)
+                            angle_radians = np.degrees(np.arccos(np.dot(N, self.norm_y) / N_norm))
                             angle_degrees = np.append(angle_degrees, angle_radians)
-                        self.yaw = -np.sort(angle_degrees)[1]
+                        self.yaw = np.sort(angle_degrees)[1]
+                        # if self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()):
+                        #     for R in Rs:
+                        #         theta2 = np.dot(R, np.array([[1.], [0.], [0.]]))[0] + self.pitch
+                        #         print(theta2)
                 forearm_receive.clear()
 
     def accel_thread(self, accel_receive):
@@ -207,11 +211,10 @@ class TargetDetection:
             coordinate_point.name = p.name
             point = np.array([[p.x], [p.y], [1]])
             if p.distance != 0:
-                point= np.dot(p.distance * self.inv_K , point)
-                point[[1, 2]] = point[[2, 1]]
-                coordinate_point.x, coordinate_point.y, coordinate_point.z = np.dot(
-                    point.T,self.R_color_to_body.as_matrix()).T[[1, 2, 0]]
-                coordinate_point.y = -coordinate_point.y
+                point = np.dot(p.distance * self.inv_K , point)
+                coordinate_point.x, coordinate_point.y, coordinate_point.z = -np.dot(
+                    point.T, self.R_color_to_body.as_matrix()).T
+                coordinate_point.x = -coordinate_point.x
             #x,y,z 前 右 下
             self.coordinate_points.coordinate_points.append( coordinate_point)
 
@@ -264,28 +267,28 @@ class TargetDetection:
     def _calibrate(self):
         calibrate_angle = self.calibrate_array.T
         calibrate_angle = np.clip(calibrate_angle, -C.g, C.g) 
-        roll = math.degrees(math.atan(-calibrate_angle[0][0] /         # roll正方向后变前
+        roll = math.degrees(math.atan(calibrate_angle[0][0] /      
                                         math.sqrt(calibrate_angle[0][1]**2 + calibrate_angle[0][2]**2)
                                         if calibrate_angle[0][1]**2 + calibrate_angle[0][2]**2 != 0. else float('inf')))
         # pitch正方向右变左 仅保证相机平放时相机向下90度内的正确性
-        pitch =  90. + math.degrees(math.atan(calibrate_angle[0][1] /      
+        self.pitch =  90. + math.degrees(math.atan(calibrate_angle[0][1] /      
                                                 math.sqrt(calibrate_angle[0][0]**2 + calibrate_angle[0][2]**2) 
                                                 if calibrate_angle[0][0]**2 + calibrate_angle[0][2]**2 != 0. else float('inf')))
         yaw = self.yaw
+        pitch = self.pitch
         rospy.loginfo("Calibration successful! ")
-        rospy.loginfo("pitch = %2f  roll = %2f yaw = %2f", pitch, roll, yaw)
-        self._color_to_body_coordinate_system(pitch, roll, yaw)
+        self._color_to_body_coordinate_system(roll, yaw)
 
-    # (彩色相机->机体)旋转矩阵计算与发布 传入的pitch, roll, yaw分别为左前下
-    def _color_to_body_coordinate_system(self, pitch, roll, yaw):
+    # (彩色相机->机体)旋转矩阵计算与发布 传入的roll, yaw分别为前下
+    def _color_to_body_coordinate_system(self, roll, yaw):
         R_body_to_color_yaw = R.from_euler('XYZ', [0, 0, yaw], degrees=True)
         # 加速度计坐标到相机坐标系仅有平移关系
         R_aceel_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
                                          -0.000925257743802, 0.999991774559])
-        R_world_to_accel = R.from_euler('XYZ', [pitch, roll, 0], degrees=True)
+        R_world_to_accel = R.from_euler('XYZ', [0, roll, 0], degrees=True)
         R_world_to_color = R_world_to_accel * R_aceel_to_color
         #缺少body与world的旋转矩阵 yaw直接参考机体 roll与pitch参考世界坐标系
-        self.R_color_to_body = ((R_world_to_color * R_body_to_color_yaw).inv())
+        self.R_color_to_body = R_body_to_color_yaw*R_world_to_color
 
         self.color_cam_to_body_tf.header.frame_id = "camera_color_frame"
         self.color_cam_to_body_tf.header.stamp = rospy.Time.now()
