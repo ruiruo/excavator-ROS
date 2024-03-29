@@ -6,7 +6,6 @@ import numpy as np
 from ultralytics import YOLO
 import pyrealsense2 as rs
 import math
-from itertools import combinations
 from scipy.spatial.transform import Rotation as R
 import scipy.constants as C
 import threading
@@ -33,6 +32,7 @@ class TargetDetection:
         self.model = YOLO(weight_path, task='pose')
         self.debug = rospy.get_param('~debug', 'False')
         self.target_box = rospy.get_param('~target_box', 'False')
+        torch.set_printoptions(sci_mode=False)
 
         # 选择yolo运行设备
         if (rospy.get_param('~cpu', 'False')):
@@ -69,7 +69,8 @@ class TargetDetection:
         align = rs.align(align_to)
 
         # 小臂apriltag配置
-        self.forearm_detector = apriltag.Detector(apriltag.DetectorOptions(families="tag36h11"))
+        self.forearm_detector = apriltag.Detector(apriltag.DetectorOptions(
+            families="tag36h11", refine_pose=True))#开启姿态解算优化后旋转矩阵默认旋转顺序XYZ
 
         # tf坐标变换话题
         self.conversion_buffer = tf2_ros.Buffer(rospy.Time())
@@ -162,28 +163,32 @@ class TargetDetection:
     def forearm_thread(self, forearm_receive):
         while not rospy.is_shutdown():
             while forearm_receive.is_set():
-                gray = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2GRAY)
+                yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
+                yuv_image[:, :, 0] = cv2.equalizeHist(yuv_image[:, :, 0])
+                gray = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2GRAY)
                 tags = self.forearm_detector.detect(gray)
                 for tag in tags:
                     if tag.tag_family == b'tag36h11' and tag.tag_id == 5:
-                        angle_degrees = np.empty((1,0))
+                        angle = np.empty((1,0))
                         num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
-                        for N in Ns:
-                            N = np.array(N)
-                            N_norm = np.linalg.norm(N)
-                            angle_radians = np.degrees(np.arccos(np.dot(N.T, self.norm_z) / N_norm))
-                            angle_degrees = np.append(angle_degrees, angle_radians)
-                        if self.yaw == 0.:
-                            self.yaw = np.sort(angle_degrees)[0]
-                            break
-                        else:
-                            self.yaw = (np.sort(angle_degrees)[0] + self.yaw)*0.5
-                        if abs(self.yaw - np.sort(angle_degrees)[0]) < 1:
-                            self.yaw_calibrate =True
-                        # if self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()):
-                        #     for R in Rs:
-                        #         theta2 = np.dot(R, np.array([[1.], [0.], [0.]]))[0] + self.pitch
-                        #         print(theta2)
+                        if not self.yaw_calibrate:
+                            for r in Rs:
+                                angle_degree = -np.degrees(np.arctan(r[1,0]/r[0,0]))
+                                angle = np.append(angle, angle_degree)
+                            if self.yaw == 0.:
+                                self.yaw = angle[0]
+                                break
+                            else:
+                                self.yaw = (angle[0] + self.yaw)*0.5
+                            if abs(self.yaw - angle[0]) < 1:
+                                self.yaw_calibrate =True
+                        
+                        if self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()):
+                            for r in Rs:
+                                angle_degree = np.degrees(
+                                    np.arctan(-r[2,0]/np.sqrt(r[0,0]**2+r[1,0]))) + self.roll
+                                angle = np.append(angle, angle_degree)
+                            print(angle)
                 forearm_receive.clear()
 
     def accel_process(self, accel_receive, calibrate_array, calibrate_array_size):
@@ -233,10 +238,8 @@ class TargetDetection:
                     point = torch.matmul(kp_tensor[row][col][2] * torch.from_numpy(self.inv_K) , point)
                     point = torch.matmul(torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float), point)
                     transform_tensor[row][col] = torch.matmul(point.squeeze(), self.R_color_to_body_tensor).squeeze()
-                    # print(transform_tensor[row][col])
                 #x,y,z 前 右 下 tensor float64
-            torch.set_printoptions(sci_mode=False)
-            print(transform_tensor)
+            # print(transform_tensor)
             return transform_tensor
         return None
 
@@ -270,6 +273,9 @@ class TargetDetection:
         
     # RGBD相机外参旋转矩阵获取
     def _calibrate(self):
+        # 加速度计坐标到相机坐标系仅有平移关系
+        aceel_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
+                                         -0.000925257743802, 0.999991774559]).as_euler('XYZ', degrees=True)
         calibrate_angle = np.clip(self.accel_calibrate_array, -C.g, C.g) 
         roll = -90 - math.degrees(math.atan(calibrate_angle[0] /         #当前姿态与正下的差值
                                         math.sqrt(calibrate_angle[1]**2 + calibrate_angle[2]**2)
@@ -277,17 +283,16 @@ class TargetDetection:
         pitch = math.degrees(math.atan(calibrate_angle[1] /               #当前姿态与正前的差值 
                                        math.sqrt(calibrate_angle[0]**2 + calibrate_angle[2]**2)
                                if calibrate_angle[0]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
+        self.roll = roll + aceel_to_color[1]
+        pitch = pitch + aceel_to_color[0]
         yaw = self.yaw
         rospy.loginfo("Calibration successful! ")
-        rospy.loginfo("pitch:%2f roll: %2f  yaw:  %2f", pitch , roll,  yaw)
+        rospy.loginfo("pitch:%2f roll: %2f  yaw:  %2f", pitch , self.roll,  yaw)
 
-    # (彩色相机->机体)旋转矩阵计算与发布 传入的roll, yaw分别为前下
+        # (彩色相机->机体)旋转矩阵计算与发布
         R_body_to_color_yaw = R.from_euler('XYZ', [0, 0, yaw], degrees=True)
-        # 加速度计坐标到相机坐标系仅有平移关系
-        aceel_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
-                                         -0.000925257743802, 0.999991774559]).as_euler('XYZ', degrees=True)
-        R_world_to_accel_pitch = R.from_euler('XYZ', [pitch+aceel_to_color[0], 0, 0], degrees=True)
-        R_world_to_accel_roll = R.from_euler('XYZ', [0, roll+aceel_to_color[1], 0], degrees=True)
+        R_world_to_accel_pitch = R.from_euler('XYZ', [pitch, 0, 0], degrees=True)
+        R_world_to_accel_roll = R.from_euler('XYZ', [0, self.roll, 0], degrees=True)
         #缺少body与world的旋转矩阵 yaw直接参考机体 roll与pitch参考世界坐标系
         R_color_to_body = R_body_to_color_yaw * R_world_to_accel_pitch  * R_world_to_accel_roll
         self.R_color_to_body_tensor = torch.tensor(R_color_to_body.as_matrix(), dtype=torch.float64)
