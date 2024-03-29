@@ -10,13 +10,13 @@ from itertools import combinations
 from scipy.spatial.transform import Rotation as R
 import scipy.constants as C
 import threading
+import multiprocessing
 import apriltag
 import torch
 
 import rospy
 from geometry2.tf2_ros.src import tf2_ros
 from geometry_msgs.msg import TransformStamped
-from target_detection.msg import Box_Point, Target_Points, Key_Point, Coordinate_point, Coordinate_points
 
 
 class TargetDetection:
@@ -43,25 +43,25 @@ class TargetDetection:
         self.cam_broadcaster = tf2_ros.StaticTransformBroadcaster()
         self.color_cam_to_body_tf = TransformStamped()
         self.yaw = 0.
+        self.yaw_calibrate = False
         self.seq = 0
         self.start_time = rospy.get_rostime()
         # 彩色相机内参按照图片旋转90度变换
         self.K = np.array([[622.461673, 0., 225.527207], 
                            [  0., 620.817214, 418.324731],[  0., 0., 1., ]], dtype=np.float64)
         self.inv_K = np.linalg.inv(self.K) 
-        self.norm_y = np.array([[0.], [-1.], [0.]])
-        self.calibrate_array = np.empty((3,0), dtype=np.float64)
-        self.calibrate_array_size = 1.
+        self.norm_z = np.array([[0.], [0.], [1.]])
+        self.accel_calibrate_array = multiprocessing.Array('f', 3)
+        self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
 
         #相机图像pipeline配置
-        self.pipeline = rs.pipeline()
+        pipeline = rs.pipeline()
         config = rs.config()
         config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 15)
         config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 15)
-        config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 250)
         while True:
             try:
-                    self.pipeline.start(config)#等待直至相机连接
+                    pipeline.start(config)#等待直至相机连接
                     break
             except Exception as e:
                 rospy.logwarn_throttle_identical(60,"Please connect camera.")
@@ -76,17 +76,17 @@ class TargetDetection:
         self.conversion_listener = tf2_ros.TransformListener(self.conversion_buffer)
 
         #发布检测框与关键点话题
-        self.position_pub = rospy.Publisher(pub_topic, Coordinate_points, queue_size=10)
+        # self.position_pub = rospy.Publisher(pub_topic, Coordinate_points, queue_size=10)
 
         # 子线程用于接受加速度计数据
-        accel_receive = threading.Event()
+        accel_receive = multiprocessing.Event()
         accel_receive.set()
-        accel_t = threading.Thread(target=self.accel_thread, args=(accel_receive,))
-        accel_t.daemon = True
-        accel_t.start()
+        accel_p = multiprocessing.Process(target=self.accel_process, \
+                                          args=(accel_receive, self.accel_calibrate_array, self.accel_calibrate_array_size,))
+        accel_p.start()
         #子线程获取小臂apriltag
         forearm_receive = threading.Event()
-        forearm_t = threading.Thread(target=self.forearm_thread, args=(forearm_receive,))
+        forearm_t = threading.Thread(target=self.forearm_thread, args=(forearm_receive, ))
         forearm_t.daemon = True
         forearm_t.start()
 
@@ -94,19 +94,17 @@ class TargetDetection:
         while not rospy.is_shutdown() :
             # try:
             # 图像获取与预处理12ms 主要为旋转耗时8ms
-                frames = self.pipeline.wait_for_frames()
+                frames = pipeline.wait_for_frames()
                 aligned_frames = align.process(frames)
                 aligned_depth_frame = aligned_frames.get_depth_frame()
                 color_frame = aligned_frames.get_color_frame()
 
                 if  aligned_depth_frame and color_frame:
                     rospy.loginfo_throttle_identical(600,"Get image!")
-                    self.TargetPoints = Target_Points()
-                    self.coordinate_points = Coordinate_points()
-                    self.coordinate_points.header.stamp = rospy.Time.now()
-                    self.seq =+ 1
-                    self.coordinate_points.header.seq = self.seq
-                    self.coordinate_points.header.frame_id = "camera_color_frame"
+                    # self.coordinate_points.header.stamp = rospy.Time.now()
+                    # self.seq =+ 1
+                    # self.coordinate_points.header.seq = self.seq
+                    # self.coordinate_points.header.frame_id = "camera_color_frame"
 
                     self.depth_image = np.asanyarray(aligned_depth_frame.get_data())
                     self.color_image = np.asanyarray(color_frame.get_data())
@@ -115,30 +113,29 @@ class TargetDetection:
                     self.depth_image = self.depth_image.astype(np.float32)
                     self.depth_image = torch.from_numpy(self.depth_image)
                     forearm_receive.set()
+                    keypoints_tensor = self._predict()
 
                 # 将校正后得到的相机外参用于关键点转换
-                if((self.calibrate_array_size >= 250) and
+                if((self.accel_calibrate_array_size.value >= 250) and self.yaw_calibrate and
                     (not self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()))):
-                    self._calibrate()
-                    #校准结束重置
                     accel_receive.clear()
-                    self.calibrate_array = np.empty((3,0), dtype=np.float64)
-                    self.calibrate_array_size = 1.
+                    self._calibrate()
+                    self.accel_calibrate_array = multiprocessing.Array('f', 3)
+                    self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
 
                 # 使用相机外参对关键点转换并发布 耗时2-4ms
                 if self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time()):
-                    self._transform_kp(self.predict())
-                    self.position_pub.publish(self.coordinate_points)
+                    self._transform_kp(keypoints_tensor)
             # except Exception as e:
             #     rospy.logwarn_throttle_identical(60,\
             #                                      "Unable to obtain camera image data, check if camera is working.")
-        self.pipeline.stop()
+        accel_p.join()
+        pipeline.stop()
         cv2.destroyAllWindows()
 
-    def predict(self):
+    def _predict(self):
             #输出模型监测结果，并导出预览图片与整理检测结果 使用engine half耗时39-44ms
             results = self.model(self.color_image, conf=self.conf, device=self.device, half=self.half)
-
             if self.show:
                 image = results[0].plot()
                 try:
@@ -172,61 +169,84 @@ class TargetDetection:
                         angle_degrees = np.empty((1,0))
                         num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
                         for N in Ns:
-                            N = np.array([0, N[1][0], N[2][0]])
+                            N = np.array(N)
                             N_norm = np.linalg.norm(N)
-                            angle_radians = np.degrees(np.arccos(np.dot(N, self.norm_y) / N_norm))
+                            angle_radians = np.degrees(np.arccos(np.dot(N.T, self.norm_z) / N_norm))
                             angle_degrees = np.append(angle_degrees, angle_radians)
-                        self.yaw = np.sort(angle_degrees)[1]
+                        if self.yaw == 0.:
+                            self.yaw = np.sort(angle_degrees)[0]
+                            break
+                        else:
+                            self.yaw = (np.sort(angle_degrees)[0] + self.yaw)*0.5
+                        if abs(self.yaw - np.sort(angle_degrees)[0]) < 1:
+                            self.yaw_calibrate =True
                         # if self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()):
                         #     for R in Rs:
                         #         theta2 = np.dot(R, np.array([[1.], [0.], [0.]]))[0] + self.pitch
                         #         print(theta2)
                 forearm_receive.clear()
 
-    def accel_thread(self, accel_receive):
+    def accel_process(self, accel_receive, calibrate_array, calibrate_array_size):
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 63)
+        while True:
+            try:
+                    pipeline.start(config)#等待直至相机连接
+                    break
+            except Exception as e:
+                rospy.logwarn_throttle_identical(60,"Please connect camera.")
         while not rospy.is_shutdown():
         # 接收到加速度信息更新加速度数据
             while accel_receive.is_set():
-                print(self.calibrate_array_size)
                 try:
-                    frames = self.pipeline.wait_for_frames()
+                    frames = pipeline.wait_for_frames()
                     accel_frame = frames.first_or_default(rs.stream.accel)
                     if accel_frame:
                         accel_data = accel_frame.as_motion_frame().get_motion_data()
-                        xyz = np.array([[accel_data.x], [accel_data.y], [accel_data.z]], dtype=np.float64)
-                        if self.calibrate_array.size > 0:
+                        xyz = [accel_data.x, accel_data.y, accel_data.z]
+                        if calibrate_array_size.value > 0:
                             # 使用递归算法更新calibrate_array
-                            self.calibrate_array = self.calibrate_array +  \
-                                (xyz - self.calibrate_array) / self.calibrate_array_size
-                            self.calibrate_array_size += 1
+                            calibrate_array[0] = calibrate_array[0] + \
+                                (xyz[0] - calibrate_array[0]) / calibrate_array_size.value
+                            calibrate_array[1] = calibrate_array[1] + \
+                                (xyz[1] - calibrate_array[1]) / calibrate_array_size.value
+                            calibrate_array[2] = calibrate_array[2] + \
+                                (xyz[2] - calibrate_array[2]) / calibrate_array_size.value
+                            calibrate_array_size.value += 1
                         else:
-                            self.calibrate_array = xyz
-                            self.calibrate_array_size = 1.
+                            calibrate_array[0] = xyz[0]
+                            calibrate_array[1] = xyz[1]
+                            calibrate_array[2] = xyz[2]
+                            calibrate_array_size.value = 1
                 except Exception as e:
-                    rospy.logwarn_throttle_identical(60,\
-                                                    "Unable to obtain camera aceel data, check if camera is working.")
-                    break
+                    rospy.logwarn_throttle_identical(60,
+                                                    "The accelerometer is subject to severe vibration. Please reconnect the camera.")
 
     # 将关键点坐标通过(彩色相机->机体)旋转矩阵进行变换
     def _transform_kp(self, kp_tensor): 
-        transform_tensor = torch.zeros(kp_tensor.size(0), kp_tensor.size(1), 3, dtype=float)
-        for row in range(kp_tensor.size(0)):
-            for col in range(kp_tensor.size(1)):
-                point = torch.tensor([[kp_tensor[row][col][0]], [kp_tensor[row][col][1]], [1.]])
-                if kp_tensor[row][col][2] != 0:
+        if kp_tensor is not None:
+            transform_tensor = torch.zeros(kp_tensor.size(0), kp_tensor.size(1), 3, dtype=float)
+            for row in range(kp_tensor.size(0)):
+                for col in range(kp_tensor.size(1)):
+                    point = torch.tensor([[kp_tensor[row][col][0]], [kp_tensor[row][col][1]], [1.]])
                     point = torch.matmul(kp_tensor[row][col][2] * torch.from_numpy(self.inv_K) , point)
-                    transform_tensor[row][col] = -torch.matmul(point.squeeze(), self.R_color_to_body_tensor).squeeze()
-                    transform_tensor[row][col][0] = -transform_tensor[row][col][0]
-            #x,y,z 前 右 下 tensor float64
-        return transform_tensor
+                    point = torch.matmul(torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float), point)
+                    transform_tensor[row][col] = torch.matmul(point.squeeze(), self.R_color_to_body_tensor).squeeze()
+                    # print(transform_tensor[row][col])
+                #x,y,z 前 右 下 tensor float64
+            torch.set_printoptions(sci_mode=False)
+            print(transform_tensor)
+            return transform_tensor
+        return None
 
     def _data_process(self, kp_tensor):
         add_distance_tensor = torch.zeros(kp_tensor.size(0), kp_tensor.size(1), 3, dtype=float)
-        for i in range(kp_tensor.size(0)):
-            for j in range(kp_tensor.size(1)):
-                mid_pos = kp_tensor[i][j]
+        for row in range(kp_tensor.size(0)):
+            for col in range(kp_tensor.size(1)):
+                mid_pos = kp_tensor[row][col]
                 distance = self._get_point_distance(mid_pos.int())
-                add_distance_tensor[i][j] = torch.cat((mid_pos, torch.tensor([distance])))
+                add_distance_tensor[row][col] = torch.cat((mid_pos, torch.tensor([distance])))
         return add_distance_tensor
 
     # 获取指定关键点距离，距离单位cm 原始数据单位为mm
@@ -245,35 +265,31 @@ class TargetDetection:
         if len(distance_list) >= 4:
             distance_list = torch.quantile(distance_list, torch.tensor([0.25, 0.5, 0.75]))
         elif len(distance_list) == 0:
-            return 0.
+            return 10.
         return torch.round(torch.mean(distance_list)* 1000) / 10000
         
     # RGBD相机外参旋转矩阵获取
     def _calibrate(self):
-        calibrate_angle = self.calibrate_array.T
-        calibrate_angle = np.clip(calibrate_angle, -C.g, C.g) 
-        roll = math.degrees(math.atan(calibrate_angle[0][0] /      
-                                        math.sqrt(calibrate_angle[0][1]**2 + calibrate_angle[0][2]**2)
-                                        if calibrate_angle[0][1]**2 + calibrate_angle[0][2]**2 != 0. else float('inf')))
-        # pitch正方向右变左 仅保证相机平放时相机向下90度内的正确性
-        self.pitch =  90. + math.degrees(math.atan(calibrate_angle[0][1] /      
-                                                math.sqrt(calibrate_angle[0][0]**2 + calibrate_angle[0][2]**2) 
-                                                if calibrate_angle[0][0]**2 + calibrate_angle[0][2]**2 != 0. else float('inf')))
+        calibrate_angle = np.clip(self.accel_calibrate_array, -C.g, C.g) 
+        roll = -90 - math.degrees(math.atan(calibrate_angle[0] /         #当前姿态与正下的差值
+                                        math.sqrt(calibrate_angle[1]**2 + calibrate_angle[2]**2)
+                                        if calibrate_angle[1]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
+        pitch = math.degrees(math.atan(calibrate_angle[1] /               #当前姿态与正前的差值 
+                                       math.sqrt(calibrate_angle[0]**2 + calibrate_angle[2]**2)
+                               if calibrate_angle[0]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
         yaw = self.yaw
-        pitch = self.pitch
         rospy.loginfo("Calibration successful! ")
-        self._color_to_body_coordinate_system(roll, yaw)
+        rospy.loginfo("pitch:%2f roll: %2f  yaw:  %2f", pitch , roll,  yaw)
 
     # (彩色相机->机体)旋转矩阵计算与发布 传入的roll, yaw分别为前下
-    def _color_to_body_coordinate_system(self, roll, yaw):
         R_body_to_color_yaw = R.from_euler('XYZ', [0, 0, yaw], degrees=True)
         # 加速度计坐标到相机坐标系仅有平移关系
-        R_aceel_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
-                                         -0.000925257743802, 0.999991774559])
-        R_world_to_accel = R.from_euler('XYZ', [0, roll, 0], degrees=True)
-        R_world_to_color = R_world_to_accel * R_aceel_to_color
+        aceel_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
+                                         -0.000925257743802, 0.999991774559]).as_euler('XYZ', degrees=True)
+        R_world_to_accel_pitch = R.from_euler('XYZ', [pitch+aceel_to_color[0], 0, 0], degrees=True)
+        R_world_to_accel_roll = R.from_euler('XYZ', [0, roll+aceel_to_color[1], 0], degrees=True)
         #缺少body与world的旋转矩阵 yaw直接参考机体 roll与pitch参考世界坐标系
-        R_color_to_body = (R_body_to_color_yaw * R_world_to_color)
+        R_color_to_body = R_body_to_color_yaw * R_world_to_accel_pitch  * R_world_to_accel_roll
         self.R_color_to_body_tensor = torch.tensor(R_color_to_body.as_matrix(), dtype=torch.float64)
 
         self.color_cam_to_body_tf.header.frame_id = "camera_color_frame"
