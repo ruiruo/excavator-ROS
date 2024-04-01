@@ -42,15 +42,13 @@ class TargetDetection:
 
         self.cam_broadcaster = tf2_ros.StaticTransformBroadcaster()
         self.color_cam_to_body_tf = TransformStamped()
-        self.yaw = 0.
         self.yaw_calibrate = False
         self.seq = 0
-        self.start_time = rospy.get_rostime()
         # 彩色相机内参按照图片旋转90度变换
         self.K = np.array([[622.461673, 0., 225.527207], 
                            [  0., 620.817214, 418.324731],[  0., 0., 1., ]], dtype=np.float64)
         self.inv_K = np.linalg.inv(self.K) 
-        self.norm_z = np.array([[0.], [0.], [1.]])
+        self.tran_flag = False
         self.accel_calibrate_array = multiprocessing.Array('f', 3)
         self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
 
@@ -93,6 +91,7 @@ class TargetDetection:
 
         # 主循环
         while not rospy.is_shutdown() :
+                self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
             # try:
             # 图像获取与预处理12ms 主要为旋转耗时8ms
                 frames = pipeline.wait_for_frames()
@@ -107,26 +106,25 @@ class TargetDetection:
                     # self.coordinate_points.header.seq = self.seq
                     # self.coordinate_points.header.frame_id = "camera_color_frame"
 
-                    self.depth_image = np.asanyarray(aligned_depth_frame.get_data())
-                    self.color_image = np.asanyarray(color_frame.get_data())
-                    self.color_image = cv2.rotate(self.color_image, cv2.ROTATE_90_CLOCKWISE)
-                    self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
-                    self.depth_image = self.depth_image.astype(np.float32)
-                    self.depth_image = torch.from_numpy(self.depth_image)
+                    depth_image = np.asanyarray(aligned_depth_frame.get_data())
+                    color_image = np.asanyarray(color_frame.get_data())
+                    self.color_image = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
+                    depth_image = cv2.rotate(depth_image, cv2.ROTATE_90_CLOCKWISE)
+                    depth_image = depth_image.astype(np.float32)
+                    self.depth_image = torch.from_numpy(depth_image)
                     forearm_receive.set()
-                    keypoints_tensor = self._predict()
+                    predict_kp = self._predict()
 
                 # 将校正后得到的相机外参用于关键点转换
-                if((self.accel_calibrate_array_size.value >= 250) and self.yaw_calibrate and
-                    (not self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()))):
+                if self.accel_calibrate_array_size.value >= 250 and self.yaw_calibrate and not self.tran_flag:
                     accel_receive.clear()
                     self._calibrate()
                     self.accel_calibrate_array = multiprocessing.Array('f', 3)
                     self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
 
                 # 使用相机外参对关键点转换并发布 耗时2-4ms
-                if self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time()):
-                    self._transform_kp(keypoints_tensor)
+                if self.tran_flag:
+                    self._transform_kp(predict_kp)
             # except Exception as e:
             #     rospy.logwarn_throttle_identical(60,\
             #                                      "Unable to obtain camera image data, check if camera is working.")
@@ -158,37 +156,51 @@ class TargetDetection:
                     keypoints = torch.stack([*results[0].keypoints.xy], dim=1).view(-1, num, 2)
                 else:
                     keypoints = results[0].keypoints.xy
-                return self._data_process(keypoints)
+                return self._get_distance(keypoints)
+            return None
 
     def forearm_thread(self, forearm_receive):
+        yaw_count = 1.
         while not rospy.is_shutdown():
             while forearm_receive.is_set():
                 yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
                 yuv_image[:, :, 0] = cv2.equalizeHist(yuv_image[:, :, 0])
-                gray = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2GRAY)
+                gray = yuv_image[:, :, 0]
                 tags = self.forearm_detector.detect(gray)
+                forearm_list = None
                 for tag in tags:
                     if tag.tag_family == b'tag36h11' and tag.tag_id == 5:
-                        angle = np.empty((1,0))
                         num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
-                        if not self.yaw_calibrate:
-                            for r in Rs:
-                                angle_degree = -np.degrees(np.arctan(r[1,0]/r[0,0]))
-                                angle = np.append(angle, angle_degree)
-                            if self.yaw == 0.:
+                        if not self.tran_flag:
+                            angle = [-np.degrees(np.arctan(r[1,0]/r[0,0])) for r in Rs[::2]]
+                            if math.isclose(yaw_count, 1.):
                                 self.yaw = angle[0]
-                                break
                             else:
-                                self.yaw = (angle[0] + self.yaw)*0.5
-                            if abs(self.yaw - angle[0]) < 1:
-                                self.yaw_calibrate =True
-                        
-                        if self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()):
-                            for r in Rs:
-                                angle_degree = np.degrees(
-                                    np.arctan(-r[2,0]/np.sqrt(r[0,0]**2+r[1,0]))) + self.roll
-                                angle = np.append(angle, angle_degree)
-                            print(angle)
+                                yaw = self.yaw + (angle[0] - self.yaw)/yaw_count
+                                if abs(self.yaw - yaw) < 0.25 and 10<self.yaw<30:
+                                    self.yaw_calibrate = True
+                                self.yaw = yaw
+                            yaw_count += 1
+                        else:
+                            if forearm_list is not None:
+                                forearm_list[0, 0, :] = tag.center
+                                forearm_list = np.vstack([forearm_list, 
+                                                        np.expand_dims(np.array([tag.corners[0], tag.corners[3]]), axis=0), 
+                                                        np.expand_dims(np.array([tag.corners[1], tag.corners[2]]), axis=0)])
+                            else:
+                                forearm_list = np.array([np.array([tag.center, tag.center]),
+                                                        np.array([tag.corners[0], tag.corners[3]]), 
+                                                        np.array([tag.corners[1], tag.corners[2]])])
+
+                if self.tran_flag:
+                    if (forearm_list[0,0,:] == forearm_list[0,1,:]).all():
+                        forearm_list = forearm_list[1:,:,:]
+                    forearm_list = self._get_distance(torch.from_numpy(forearm_list))
+                    forearm_coordinate = self._transform_kp(forearm_list)
+                    forearm_roll_list = torch.tensor(
+                        [torch.rad2deg(torch.atan(vector[2]/vector[0])).item() 
+                         for vector in (row[0] - row[1] for row in forearm_coordinate)])
+                    self.forearm_roll = torch.mean(torch.sort(forearm_roll_list).values[1:-1])
                 forearm_receive.clear()
 
     def accel_process(self, accel_receive, calibrate_array, calibrate_array_size):
@@ -236,20 +248,24 @@ class TargetDetection:
                 for col in range(kp_tensor.size(1)):
                     point = torch.tensor([[kp_tensor[row][col][0]], [kp_tensor[row][col][1]], [1.]])
                     point = torch.matmul(kp_tensor[row][col][2] * torch.from_numpy(self.inv_K) , point)
-                    point = torch.matmul(torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float), point)
-                    transform_tensor[row][col] = torch.matmul(point.squeeze(), self.R_color_to_body_tensor).squeeze()
+                    if self.tran_flag:
+                        point = torch.matmul(torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float), point)
+                        transform_tensor[row][col] = torch.matmul(point.squeeze(), self.R_color_to_body_tensor).squeeze()
+                    else:
+                         transform_tensor[row][col] = torch.matmul(
+                             torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float), point).squeeze()
                 #x,y,z 前 右 下 tensor float64
             # print(transform_tensor)
             return transform_tensor
         return None
 
-    def _data_process(self, kp_tensor):
+    def _get_distance(self, kp_tensor):
         add_distance_tensor = torch.zeros(kp_tensor.size(0), kp_tensor.size(1), 3, dtype=float)
         for row in range(kp_tensor.size(0)):
             for col in range(kp_tensor.size(1)):
                 mid_pos = kp_tensor[row][col]
                 distance = self._get_point_distance(mid_pos.int())
-                add_distance_tensor[row][col] = torch.cat((mid_pos, torch.tensor([distance])))
+                add_distance_tensor[row][col] = torch.cat((mid_pos, distance))
         return add_distance_tensor
 
     # 获取指定关键点距离，距离单位cm 原始数据单位为mm
@@ -268,8 +284,8 @@ class TargetDetection:
         if len(distance_list) >= 4:
             distance_list = torch.quantile(distance_list, torch.tensor([0.25, 0.5, 0.75]))
         elif len(distance_list) == 0:
-            return 10.
-        return torch.round(torch.mean(distance_list)* 1000) / 10000
+            return torch.tensor(10.).unsqueeze(0)
+        return (torch.round(torch.mean(distance_list)* 1000) / 10000).unsqueeze(0)
         
     # RGBD相机外参旋转矩阵获取
     def _calibrate(self):
@@ -277,12 +293,13 @@ class TargetDetection:
         aceel_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
                                          -0.000925257743802, 0.999991774559]).as_euler('XYZ', degrees=True)
         calibrate_angle = np.clip(self.accel_calibrate_array, -C.g, C.g) 
-        roll = -90 - math.degrees(math.atan(calibrate_angle[0] /         #当前姿态与正下的差值
+        roll = -90 - math.degrees(math.atan(calibrate_angle[0] /         #当前姿态与正下的差值 右为正方向
                                         math.sqrt(calibrate_angle[1]**2 + calibrate_angle[2]**2)
-                                        if calibrate_angle[1]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
-        pitch = math.degrees(math.atan(calibrate_angle[1] /               #当前姿态与正前的差值 
+                                        if not math.isclose(calibrate_angle[1]**2 + calibrate_angle[2]**2, 0.) else float('inf')))
+        pitch = math.degrees(math.atan(calibrate_angle[1] /               #当前姿态与正前的差值 前为正方向
                                        math.sqrt(calibrate_angle[0]**2 + calibrate_angle[2]**2)
-                               if calibrate_angle[0]**2 + calibrate_angle[2]**2 != 0. else float('inf')))
+                               if not math.isclose(calibrate_angle[0]**2 + calibrate_angle[2]**2, 0.) else float('inf')))
+        #缺少body与world的旋转矩阵 yaw直接参考机体 roll与pitch参考世界坐标系
         self.roll = roll + aceel_to_color[1]
         pitch = pitch + aceel_to_color[0]
         yaw = self.yaw
@@ -290,11 +307,7 @@ class TargetDetection:
         rospy.loginfo("pitch:%2f roll: %2f  yaw:  %2f", pitch , self.roll,  yaw)
 
         # (彩色相机->机体)旋转矩阵计算与发布
-        R_body_to_color_yaw = R.from_euler('XYZ', [0, 0, yaw], degrees=True)
-        R_world_to_accel_pitch = R.from_euler('XYZ', [pitch, 0, 0], degrees=True)
-        R_world_to_accel_roll = R.from_euler('XYZ', [0, self.roll, 0], degrees=True)
-        #缺少body与world的旋转矩阵 yaw直接参考机体 roll与pitch参考世界坐标系
-        R_color_to_body = R_body_to_color_yaw * R_world_to_accel_pitch  * R_world_to_accel_roll
+        R_color_to_body = R.from_euler('XYZ', [pitch, self.roll, yaw], degrees=True)
         self.R_color_to_body_tensor = torch.tensor(R_color_to_body.as_matrix(), dtype=torch.float64)
 
         self.color_cam_to_body_tf.header.frame_id = "camera_color_frame"
