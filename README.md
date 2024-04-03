@@ -93,7 +93,7 @@ python2 -m pip insatll empy==3.3.4
 3. 使用python3解释器编译在python3环境下运行的节点(不要在虚拟环境编译)
 
 ```
-catkin build geometry2 target_detection --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
+catkin build geometry2 cv_joint_angle --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
 ```
 
 4. 编译其余节点

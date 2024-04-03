@@ -3,7 +3,7 @@
 
 init(){
     echo -e "All nodes start! "
-    gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch target_detection yolov8.launch" 
+    gnome-terminal --window -- bash -c "source ~/workspace/yolov8_venv/bin/activate; roslaunch cv_joint_angle yolov8.launch" 
     sleep 8
 }
 
@@ -22,7 +22,7 @@ runing(){
         trap key=1 SIGINT SIGTERM
     done
     echo " "
-    rosnode kill target_detection
+    rosnode kill cv_joint_angle
 }
 
 exit(){

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<launch>
+  <node pkg="cv_joint_angle" type="yolov8.py" name="cv_joint_angle" output="screen" >
+    <param name="weight_path"       value="$(find cv_joint_angle)/weights/3i6p_old_800_allp.onnx"/>
+    <param name="conf"              value='0.8' /> <!--目标识别置信度-->
+    <param name="half"           value='False' /> <!--使用半浮点数-->
+    <param name="point_search_range"           value='6' /> <!--获取关键点深度的搜索范围，0为关键点坐标处，1为向外围一周，以此类推, 值越大召回率越高准确度越低-->
+    <param name="cpu"           value='True' /> <!--是否使用cpu进行yolo推理-->
+    <param name="show"           value='True' /> <!--是否显示实时画面-->
+    <param name="pub_topic"         value="/cv_joint_angle" />
+    <param name="debug"           value='True' />
+    <param name="center2A_offset"           value='[1.25, 1.1, 1.65]' /> <!--小臂最下apriltag标记中心点到A点的偏移，方向为前右下，单位cm-->
+    <param name="B_tolerance_scope"           value='1.15' /> <!--B点误差范围，通常指的是B点所在柱体的直径大小，单位cm-->
+    <!--推算第四个点四边形的边长数据，格式为[A_down2A, A2B, B2B_down, B_down2A_down]或
+    [小臂与铲斗旋转轴到摇杆与小臂链接点长度, 摇杆长度, 连杆长度, 连杆与摇杆链接点到连杆与铲斗链接点长度]单位cm-->
+    <param name="quadrilateral_side_length"           value='[3.2, 5.35, 5.25, 4.3]' /> 
+  </node>
+
+</launch>
