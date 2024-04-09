@@ -9,7 +9,7 @@
     <param name="cpu"           value='True' /> <!--是否使用cpu进行yolo推理-->
     <param name="show"           value='True' /> <!--是否显示实时画面-->
     <param name="pub_topic"         value="/cv_joint_angle" />
-    <param name="debug"           value='True' />
+    <param name="debug"           value='False' />
     <param name="center2A_offset"           value='[1.25, 1.1, 1.65]' /> <!--小臂最下apriltag标记中心点到A点的偏移，方向为前右下，单位cm-->
     <param name="B_tolerance_scope"           value='1.15' /> <!--B点误差范围，通常指的是B点所在柱体的直径大小，单位cm-->
     <!--推算第四个点四边形的边长数据，格式为[A_down2A, A2B, B2B_down, B_down2A_down]或

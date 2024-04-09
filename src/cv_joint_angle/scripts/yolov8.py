@@ -7,8 +7,8 @@ import math
 from scipy.spatial.transform import Rotation as R
 import scipy.constants as C
 
-import multiprocessing, threading
-import ast
+import multiprocessing
+import ast, glob, os, time
 
 import cv2
 from ultralytics import YOLO
@@ -34,26 +34,20 @@ class TargetDetection:
         self.classes = (None if rospy.get_param('~yolo_classes', 'None') == 'None' 
                         else ast.literal_eval(rospy.get_param('~yolo_classes', 'None')))
         self.target_box = rospy.get_param('~target_box', 'False')
-        print(rospy.get_param('~cpu', 'False'))
         self.device = 'cpu' if rospy.get_param('~cpu', 'False') == True else '0'
 
         # 姿态获取与校正参数
         self.point_search_range = int(rospy.get_param('~point_search_range', '4'))
-        self.center2A = torch.tensor(ast.literal_eval(
-            rospy.get_param('~center2A_offset', '[1.25, 1.1, 1.65]')), dtype=torch.float64)
+        self.center2A = np.array(ast.literal_eval(
+            rospy.get_param('~center2A_offset', '[1.25, 1.1, 1.65]')), dtype=np.float64)
         self.B_error = float(rospy.get_param('~B_tolerance_scope', '1.15'))
-        self.quadrilateral_length = torch.tensor(ast.literal_eval(rospy.get_param(
-            '~quadrilateral_side_length', '[3.2, 5.35, 5.25, 4.3]')), dtype=torch.float64)
+        self.quadrilateral_length = np.array(ast.literal_eval(rospy.get_param(
+            '~quadrilateral_side_length', '[3.2, 5.35, 5.25, 4.3]')), dtype=np.float64)
         self.A2Adown = self.quadrilateral_length[0]
         self.A2B = self.quadrilateral_length[1]
         
-        # 发布话题名称
-        pub_topic = rospy.get_param('~pub_topic', '/cv_joint_angle')
-        
         # 调试参数
         self.debug = rospy.get_param('~debug', 'False') == 'True'
-        if self.debug:
-            torch.set_printoptions(sci_mode=False)
 
         # ROS话题相关参数
         self.tran_flag = False
@@ -65,12 +59,12 @@ class TargetDetection:
         self.conversion_buffer = tf2_ros.Buffer(rospy.Time())
         self.conversion_listener = tf2_ros.TransformListener(self.conversion_buffer)
         #发布倾角话题
+        pub_topic = rospy.get_param('~pub_topic', '/cv_joint_angle')
         self.angle_pub = rospy.Publisher(pub_topic, Joint_angle, queue_size=1)
 
         #相机参数
         self.K = np.array([[622.461673, 0., 225.527207], 
                            [  0., 620.817214, 418.324731],[  0., 0., 1., ]], dtype=np.float64)
-        self.K_tensor = torch.from_numpy(self.K)
         self.inv_K = np.linalg.inv(self.K) 
         #相机图像pipeline配置
         pipeline = rs.pipeline()
@@ -90,6 +84,9 @@ class TargetDetection:
         #多进程参数
         self.accel_calibrate_array = multiprocessing.Array('f', 3)
         self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
+        self.apriltag_bag = multiprocessing.Array('f', 8)
+        self.yaw = multiprocessing.Value('f', 0)
+        self.time_stamp = multiprocessing.Value('i', 0)
         # 子进程用于接受加速度计数据
         accel_receive = multiprocessing.Event()
         accel_receive.set()
@@ -97,22 +94,20 @@ class TargetDetection:
                                           args=(accel_receive, self.accel_calibrate_array, self.accel_calibrate_array_size,))
         accel_p.start()
 
-        # 多线程参数
-        self.apriltag_bag = None
-        self.forearm_thread_record_time = None
-        self.yaw_calibrate = False
         # 小臂apriltag配置
         self.forearm_detector = apriltag.Detector(apriltag.DetectorOptions(
             families="tag36h11", refine_pose=True))#开启姿态解算优化后旋转矩阵默认旋转顺序XYZ
-        #子线程获取小臂apriltag
-        forearm_receive = threading.Event()
-        forearm_t = threading.Thread(target=self.forearm_thread, args=(forearm_receive, ))
-        forearm_t.daemon = True
-        forearm_t.start()
+        #子进程获取小臂apriltag
+        forearm_receive = multiprocessing.Event()
+        yaw_calibrate = multiprocessing.Event()
+        yaw_calibrate.clear()
+        forearm_p = multiprocessing.Process(target=self.forearm_process, \
+                                            args=(forearm_receive, self.yaw, yaw_calibrate, self.apriltag_bag, self.time_stamp))
+        forearm_p.start()
+        self._clear_npy()
 
         # 主循环
         while not rospy.is_shutdown() :
-                self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
             # try:
             # 图像获取与预处理12ms 主要为旋转耗时8ms
                 frames = pipeline.wait_for_frames()
@@ -128,49 +123,94 @@ class TargetDetection:
                     self.joint_angle.header.seq = self.seq
                     self.joint_angle.header.frame_id = "camera_color_frame"
 
-                    depth_image = np.asanyarray(aligned_depth_frame.get_data())
+                    time_stamp = self.joint_angle.header.stamp.nsecs
+                    self.time_stamp.value = time_stamp
                     color_image = np.asanyarray(color_frame.get_data())
                     self.color_image = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
-                    depth_image = cv2.rotate(depth_image, cv2.ROTATE_90_CLOCKWISE)
-                    depth_image = depth_image.astype(np.float32)
-                    self.depth_image = torch.from_numpy(depth_image)
-                    forearm_receive.set()
+                    color_image_name = f"{time_stamp}_color.npy"
+                    depth_image = np.asanyarray(aligned_depth_frame.get_data())
+                    self.depth_image = cv2.rotate(depth_image, cv2.ROTATE_90_CLOCKWISE)
+                    depth_image_name = f"{time_stamp}_depth.npy"
+                    np.save(color_image_name, self.color_image)
+                    np.save(depth_image_name, self.depth_image)
+                    if os.path.exists(color_image_name) and os.path.exists(depth_image_name):
+                        forearm_receive.set()
 
                 # 将校正后得到的相机外参用于关键点转换
-                if self.accel_calibrate_array_size.value >= 250 and self.yaw_calibrate and not self.tran_flag:
-                    accel_receive.clear()
+                if self.accel_calibrate_array_size.value >= 250 and yaw_calibrate.is_set() and not self.tran_flag:
                     self._calibrate()
-                    self.accel_calibrate_array = multiprocessing.Array('f', 3)
-                    self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
-
+                    accel_p.terminate()
                 # 得到相机外参后计算各关节倾角并发布
                 if self.tran_flag:
                     yolo_result = self._transform_kp(self._predict())
-                    self.joint_angle.forearm, self.joint_angle.bucket = self._bucket_attitude(yolo_result[:2,:])
+                    result = self._bucket_attitude(yolo_result[:2,:])
+                    if result is not None:
+                        self.joint_angle.forearm, self.joint_angle.bucket = result
+                    else:
+                         rospy.logwarn_throttle_identical(1, "No data available")
                     self.angle_pub.publish(self.joint_angle)
                     rospy.loginfo_throttle_identical(60, "Node is running...")
+                
+                self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
+                
             # except Exception as e:
             #     rospy.logwarn_throttle_identical(60,\
             #                                      "Unable to obtain camera image data, check if camera is working.")
+        forearm_p.terminate()
+        self._clear_npy()
         cv2.destroyAllWindows()
         pipeline.stop()
-        accel_p.terminate()()
 
-    def forearm_thread(self, forearm_receive):
+    def forearm_process(self, forearm_receive, yaw, yaw_cal, apriltag_bag, time_stamp):
         '''
-        这个线程负责检测apriltag并计算姿态
+        这个进程负责检测apriltag并计算姿态
         校正完成前: 持续更新相机与机体的yaw差值
         校正完成后: 持续更新小臂方位角与A、A_down关键点三维信息
 
-        @param forearm_receive: 被设置时线程将持续更新数据
+        @param forearm_receive: 被设置时进程将持续更新数据
+
+        @param apriltag_bag: 最新小臂姿态信息
+        @type  name: multiprocessing.Array
         '''
         yaw_count = 1.
         while not rospy.is_shutdown():
             while forearm_receive.is_set():
+                color_image = None
+                depth_image = None
+                npy_files = glob.glob('*.npy')
+                if len(npy_files)>=2:
+                    split_names = [os.path.splitext(f)[0].split('_') for f in npy_files]
+                    grouped_files = {}
+                    for name_parts in split_names:
+                        if name_parts[0] not in grouped_files:
+                            grouped_files[name_parts[0]] = []
+                        grouped_files[name_parts[0]].append('_'.join(name_parts))
+                    for timestamp, files in grouped_files.items():
+                        if int(timestamp) !=  time_stamp.value:
+                            continue
+                        for file in files:
+                            if 'color' in file:
+                                color_image = np.load(f"{file}.npy")
+                            elif 'depth' in file:
+                                depth_image = np.load(f"{file}.npy").astype(np.float64)
+                if rospy.get_time()-self.start_time>5:
+                    if len(npy_files)<2 :
+                        rospy.logwarn_throttle_identical(5, "Forearm_process didn't find picture")
+                        break
+                    elif color_image is None or depth_image is None:
+                        rospy.logwarn_throttle_identical(5, 
+                                                        "Forearm_process cannot find an image with a suitable timestamp")
+                        self._clear_npy()
+                        break
+                else :
+                    if len(npy_files)<2 or color_image is None or depth_image is None:
+                        self._clear_npy()
+                        break
+                self._clear_npy()
                 # yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
                 # yuv_image[:, :, 0] = cv2.equalizeHist(yuv_image[:, :, 0])
                 # gray = yuv_image[:, :, 0]
-                gray = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2GRAY)
+                gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
                 tags = self.forearm_detector.detect(gray)
                 if tags == [] and rospy.get_time()-self.start_time>5:
                         rospy.logwarn_throttle_identical(5, "No apriltag detected")
@@ -178,23 +218,24 @@ class TargetDetection:
                 else:
                     num = len(tags)
                     rospy.logdebug_throttle(10, "Have %d apriltag(s) detected", num)
-                
                 forearm_list = None
                 for tag in tags:
                     if tag.tag_family == b'tag36h11' and tag.tag_id == 5:
                         num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
-                        if not self.tran_flag:
+                        if not yaw_cal.is_set():
                             angle = [-np.degrees(np.arctan(r[1, 0] / r[0, 0])) for r in Rs[::2]]
-                            first_angle = angle[0] if angle else 0  
+                            first_angle = float(angle[0]) if angle else None
+                            if   first_angle is None:
+                                break
                             if math.isclose(yaw_count, 1.):
-                                self.yaw = first_angle
+                                yaw.value = first_angle
                             else:
-                                self.yaw += (first_angle - self.yaw) / yaw_count
+                                yaw.value += (first_angle - yaw.value) / yaw_count
                                 if yaw_count>100:
                                     yaw_count = 1.
                             yaw_count += 1
-                            if 15 < self.yaw < 30 and abs(self.yaw - first_angle) < 0.25:
-                                self.yaw_calibrate = True
+                            if 15 < yaw.value < 30 and abs(yaw.value - first_angle) < 0.25:
+                                yaw_cal.set()
                                 yaw_count = 1.
                                 break
                         else:
@@ -207,25 +248,30 @@ class TargetDetection:
                                 forearm_list = np.array([np.array([tag.center, tag.center]),
                                                         np.array([tag.corners[0], tag.corners[3]]), 
                                                         np.array([tag.corners[1], tag.corners[2]])])
-
-                if self.tran_flag and forearm_list is not None:
-                    forearm_list = self._get_distance(torch.from_numpy(forearm_list))
+                if yaw_cal.is_set() and forearm_list is not None:
+                    forearm_list = self._get_distance(forearm_list, depth_image)
                     forearm_coordinate = self._transform_kp(forearm_list)
                     center = forearm_coordinate[0, 0] if forearm_coordinate[0, 0, 2] > forearm_coordinate[0, 1, 2] else forearm_coordinate[0, 1]
                     if (forearm_coordinate[0, 0, :] == forearm_coordinate[0, 1, :]).all():
                         forearm_coordinate = forearm_coordinate[1:, :, :]
                     vector_diff = forearm_coordinate[:, 0, :] - forearm_coordinate[:, 1, :]
-                    forearm_roll_list = torch.rad2deg(torch.atan(vector_diff[:, 2] / vector_diff[:, 0]))
-                    forearm_roll = torch.mean(torch.sort(forearm_roll_list).values)
-                    roll_sin = torch.sin(torch.deg2rad(forearm_roll))
-                    roll_cos = torch.cos(torch.deg2rad(forearm_roll))
-                    A_apriltag = center + torch.matmul(
-                        self.center2A, torch.tensor([[roll_sin, 0, roll_cos], [0, 1, 0], [roll_cos, 0, -roll_sin]], dtype=torch.float64))
-                    Adown_apriltag = A_apriltag + torch.tensor(
-                        [roll_cos * self.A2Adown, 0, roll_sin * self.A2Adown], dtype=torch.float)
+                    forearm_roll_list = np.degrees(np.arctan(vector_diff[:, 2] / vector_diff[:, 0]))
+                    forearm_roll = np.mean(np.sort(forearm_roll_list))
+                    roll_sin = np.sin(np.deg2rad(forearm_roll))
+                    roll_cos = np.cos(np.deg2rad(forearm_roll))
+                    A_apriltag = center + np.dot(
+                        self.center2A, np.array([[roll_sin, 0, roll_cos], [0, 1, 0], [roll_cos, 0, -roll_sin]], dtype=np.float64))
+                    Adown_apriltag = A_apriltag + np.array(
+                        [roll_cos * self.A2Adown, 0, roll_sin * self.A2Adown], dtype=np.float64)
 
-                    self.apriltag_bag = torch.cat((torch.tensor(rospy.get_rostime().nsecs).unsqueeze(0), 
-                                                   forearm_roll.unsqueeze(0), A_apriltag, Adown_apriltag))
+                    apriltag_bag[1] = forearm_roll
+                    apriltag_bag[2] = A_apriltag[0]
+                    apriltag_bag[3] = A_apriltag[1]
+                    apriltag_bag[4] = A_apriltag[2]
+                    apriltag_bag[5] = Adown_apriltag[0]
+                    apriltag_bag[6] = Adown_apriltag[1]
+                    apriltag_bag[7] = Adown_apriltag[2]
+                    apriltag_bag[0] = time_stamp.value
                 forearm_receive.clear()
 
     def accel_process(self, accel_receive, calibrate_array, calibrate_array_size):
@@ -308,74 +354,67 @@ class TargetDetection:
                     keypoints = torch.stack([*results[0].keypoints.xy], dim=1).view(-1, num, 2)
                 else:
                     keypoints = (results[0].keypoints.xy).unsqueeze(0).view(-1, num, 2)
-                return self._get_distance(keypoints)
+                return self._get_distance(keypoints.numpy())
             return None
 
-    def _transform_kp(self, kp_tensor): 
+    def _transform_kp(self, kp): 
         '''
         通过(彩色相机->机体)旋转矩阵变换关键点坐标.
 
-        @param kp_tensor: 包含关键点三维坐标的张量, 形状为 (n, m, 3).
+        @param kp: 包含关键点三维坐标的, 形状为 (n, m, 3).
                         'n' 代表不同种类的数量, 'm' 代表同一种类中关键点的数量.
-        @type kp_tensor: torch.Tensor
+        @type kp: np.array
 
-        @return: 变换后的关键点坐标张量, 形状与输入相同.
-        @rtype: torch.Tensor 或 None
+        @return: 变换后的关键点坐标, 形状与输入相同.
+        @rtype: np.array 或 None
 
-        如果输入的 kp_tensor 不为空, 此函数将对每个关键点应用旋转变换, 
-        并返回变换后的坐标张量. 如果输入为空, 则返回 None. 
+        如果输入的 kp 不为空, 此函数将对每个关键点应用旋转变换, 
+        并返回变换后的坐标. 如果输入为空, 则返回 None. 
         '''
-        if kp_tensor is not None:
-            transform_tensor = torch.zeros(kp_tensor.size(0), kp_tensor.size(1), 3, dtype=torch.float64)
-            for row in range(kp_tensor.size(0)):
-                for col in range(kp_tensor.size(1)):
-                    point = torch.tensor([[kp_tensor[row][col][0]], [kp_tensor[row][col][1]], [1.]])
-                    point = torch.matmul(kp_tensor[row][col][2] * torch.from_numpy(self.inv_K) , point)
+        if kp is not None:
+            transform_kp = np.zeros((kp.shape[0], kp.shape[1], 3), dtype=np.float64)
+            for row in range(kp.shape[0]):
+                for col in range(kp.shape[1]):
+                    point = np.array([[kp[row, col, 0]], [kp[row, col, 1]], [1.]])
+                    point = kp[row, col, 2] * np.dot(self.inv_K, point)
                     if self.tran_flag:
-                        point = torch.matmul(torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=torch.float64), point)
-                        transform_tensor[row][col] = torch.matmul(point.squeeze(), self.R_color_to_body_tensor).squeeze()
+                        point = np.dot(np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=np.float64), point)
+                        transform_kp[row, col] = np.dot(point.T, self.R_color_to_body).ravel()
                     else:
-                         transform_tensor[row][col] = torch.matmul(
-                             torch.tensor([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=torch.float64), point).squeeze()
-                #x,y,z 前 右 下 tensor float64
-            return transform_tensor
+                        transform_kp[row, col] = np.dot(
+                            np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=np.float64), point).ravel()
+            # x,y,z 前 右 下
+            return transform_kp
         return None
 
     def _bucket_attitude(self, AB_kps):
         '''
         计算铲斗的方位角, 并结合小臂的方位角输出
 
-        @param AB_kps:包含A、B关键点的(2, m, 3)张量, 其中m为相同种类点的个数
-        @type AB_kps:torch.Tensor
+        @param AB_kps:包含A、B关键点的(2, m, 3), 其中m为相同种类点的个数
+        @type AB_kps:np.array
         
         @return: 返回一个包含小臂方位角和铲斗方位角的元组
-        @rtype: tuple(torch.Tensor) 或 None
+        @rtype: tuple(np.array) 或 None
 
         此函数首先检查是否有有效的 AprilTag 数据包
         如果没有, 将记录警告并返回 None
         如果有新的 AprilTag 更新, 将计算并返回小臂和铲斗的方位角
         '''
-        if self.apriltag_bag is not None:
-            apriltag_msg = self.apriltag_bag
-        else:
-            rospy.logwarn_throttle_identical(5, "No apriltag bag.")
-            return None
-        if (self.forearm_thread_record_time is None or 
-            self.forearm_thread_record_time != apriltag_msg[0]):
-            self.forearm_thread_record_time = apriltag_msg[0]
-        else:
+        apriltag_msg = [*self.apriltag_bag]
+        if abs(self.joint_angle.header.stamp.nsecs - apriltag_msg[0])>1000:
             rospy.logwarn_throttle_identical(5, "No new aprilatg updates.")
             return None
         point_A = apriltag_msg[2:5]
         point_A_down = apriltag_msg[5:]
         point_B = self._correction_point_B(point_A, AB_kps)
         point_B_down = self._calculate_opposite_quadrilateral_vertex(point_A_down, point_B)
-        A2B_down_distance = torch.norm(point_A - point_B_down)
-        angle_NQK = torch.rad2deg(torch.arccos((
+        A2B_down_distance = np.linalg.norm(point_A - point_B_down)
+        angle_NQK = np.degrees(np.arccos((
             self.quadrilateral_length[0]**2 + self.quadrilateral_length[3]**2 - A2B_down_distance)/
             (2 * self.quadrilateral_length[0] * self.quadrilateral_length[3])))
-        bucket_roll = angle_NQK - self.apriltag_bag[1] + 5.5 + 108
-        return self.apriltag_bag[1], bucket_roll
+        bucket_roll = float(angle_NQK - apriltag_msg[1] + 5.5 + 108)
+        return apriltag_msg[1], bucket_roll
         
     def _calculate_opposite_quadrilateral_vertex(self, vertex_A, vertex_B):
         '''
@@ -383,24 +422,24 @@ class TargetDetection:
 
         @param vertex_A: 第一个圆的圆心坐标
         @param vertex_B: 第二个圆的圆心坐标
-        @type vertex_A, vertex_B: torch.Tensor
+        @type vertex_A, vertex_B: np.array
 
         @return: 位于更高z坐标的交点, 代表四边形的对角顶点
-        @rtype: torch.Tensor
+        @rtype: np.array
 
         此函数通过计算两个圆的交点来确定四边形的一个未知顶点
         交点是通过解析几何方法得出的
         '''
         radius_A = self.quadrilateral_length[3]
         radius_B = self.quadrilateral_length[2]
-        center_distance = torch.norm(vertex_B - vertex_A)
+        center_distance = np.linalg.norm(vertex_B - vertex_A)
         a = (radius_A**2 - radius_B**2 + center_distance**2) / (2 * center_distance)
-        h = torch.sqrt(radius_A**2 - a**2)
+        h = np.sqrt(radius_A**2 - a**2)
         midpoint = vertex_A + a * (vertex_B - vertex_A) / center_distance
-        intersection1 = midpoint + h * torch.tensor(
-            [-1 * (vertex_B[2] - vertex_A[2]) / center_distance, 0, (vertex_B[0] - vertex_A[0]) / center_distance], dtype=torch.float64)
-        intersection2 = midpoint - h * torch.tensor(
-            [-1 * (vertex_B[2] - vertex_A[2]) / center_distance, 0, (vertex_B[0] - vertex_A[0]) / center_distance], dtype=torch.float64)
+        intersection1 = midpoint + h * np.array(
+            [-1 * (vertex_B[2] - vertex_A[2]) / center_distance, 0, (vertex_B[0] - vertex_A[0]) / center_distance], dtype=np.float64)
+        intersection2 = midpoint - h * np.array(
+            [-1 * (vertex_B[2] - vertex_A[2]) / center_distance, 0, (vertex_B[0] - vertex_A[0]) / center_distance], dtype=np.float64)
         return intersection1 if intersection1[2] > intersection2[2] else intersection2
 
     def _correction_point_B(self, A_apriltag, AB_yolo_kps):
@@ -408,76 +447,77 @@ class TargetDetection:
         通过apriltag_A与yolo推理A偏差来纠正yolo推理B, 并将B与apriltag_A对齐同一y平面
 
         @param A_apriltag: apriltag检测得到的A点的三维坐标。
-        @param AB_yolo_kps: YOLO检测得到的A、B两点的三维坐标张量, 形状为 (2, m, 3), 其中m为同类点的数量
-        @type A_apriltag, AB_yolo_kps: torch.Tensor
+        @param AB_yolo_kps: YOLO检测得到的A、B两点的三维坐标, 形状为 (2, m, 3), 其中m为同类点的数量
+        @type A_apriltag, AB_yolo_kps: np.array
 
         @return: 校正后的B点三维信心
-        @rtype: torch.Tensor
+        @rtype: np.array
 
-        该函数首先计算A点的y坐标与YOLO关键点y坐标的比例, 以此来调整AB_yolo_kps张量,
+        该函数首先计算A点的y坐标与YOLO关键点y坐标的比例, 以此来调整AB_yolo_kps,
         使得B点的y坐标与A点对齐. 然后, 根据A点和B点的z坐标差异, 进一步调整B点的z坐标,
         以确保B点的准确性
         '''
-        ac = (A_apriltag[1] / AB_yolo_kps[:, :, 1]).unsqueeze(1) * AB_yolo_kps - A_apriltag
-        ac_normalized = ac / torch.norm(ac, dim=2, keepdim=True)
-        AB_yolo_kps = A_apriltag + self.A2B * ac_normalized.squeeze(2)
-        A_yolo, B_yolo = torch.mean(AB_yolo_kps, dim=1)
-        A_delta_z = torch.clamp(A_apriltag[2] - A_yolo[2], -self.B_error/2., self.B_error/2.)
+        ac = (A_apriltag[1] / AB_yolo_kps[:, :, 1, np.newaxis]) * AB_yolo_kps - A_apriltag
+        ac_normalized = ac / np.linalg.norm(ac, axis=2, keepdims=True)
+        AB_yolo_kps = A_apriltag + self.A2B * ac_normalized
+        A_yolo, B_yolo = np.mean(AB_yolo_kps, axis=1)
+        A_delta_z = np.clip(A_apriltag[2] - A_yolo[2], -self.B_error/2., self.B_error/2.)
         B_yolo[2] += A_delta_z
         ab_vector = B_yolo - A_apriltag
-        ab_vector_normalized = ab_vector / torch.norm(ab_vector)
+        ab_vector_normalized = ab_vector / np.linalg.norm(ab_vector)
         B_yolo_new = A_apriltag + self.A2B * ab_vector_normalized
         return B_yolo_new
             
-    def _get_distance(self, kp_tensor):
+    def _get_distance(self, kp, depth_img=None):
         '''
-        获取关键点距离数值并拼接进输入张量.
+        获取关键点距离数值并拼接进输入
 
-        @param kp_tensor: 包含关键点三维坐标的张量, 形状为 (n, m, 2).
+        @param kp: 包含关键点三维坐标, 形状为 (n, m, 2).
                         'n' 代表不同种类的数量, 'm' 代表同一种类中关键点的数量.
-        @type kp_tensor: torch.Tensor
+        @type kp: np.array
 
-        @return: 获得距离的关键点坐标张量, 形状为 (n, m, 3).
-        @rtype: torch.Tensor
+        @return: 获得距离的关键点坐标, 形状为 (n, m, 3).
+        @rtype: np.array
         '''
-        add_distance_tensor = torch.zeros(kp_tensor.size(0), kp_tensor.size(1), 3, dtype=torch.float64)
-        for row in range(kp_tensor.size(0)):
-            for col in range(kp_tensor.size(1)):
-                mid_pos = kp_tensor[row][col]
-                distance = self._get_point_distance(mid_pos.int())
-                add_distance_tensor[row][col] = torch.cat((mid_pos, distance))
-        return add_distance_tensor
+        if depth_img is None:
+            depth_img = self.depth_image
+        add_distance_array = np.zeros((kp.shape[0], kp.shape[1], 3), dtype=np.float64)
+        for row in range(kp.shape[0]):
+            for col in range(kp.shape[1]):
+                mid_pos = kp[row, col]
+                distance = self._get_point_distance(mid_pos.astype(int), depth_img)
+                add_distance_array[row, col] = np.concatenate((mid_pos, distance))
+        return add_distance_array
 
-    def _get_point_distance(self, pixel_coordinates):
+    def _get_point_distance(self, pixel_coordinates, depth_image):
         '''
         计算指定像素坐标处关键点的距离, 单位为厘米, 原始深度图像数据单位为毫米
 
         @param pixel_coordinates: 指定关键点的像素坐标
-        @type pixel_coordinates: torch.Tensor
+        @type pixel_coordinates: np.array
 
         @return: 计算得到的关键点距离
-        @rtype: torch.Tensor
+        @rtype: np.array
 
         此函数在深度图像中搜索指定像素坐标周围的非零距离值,
         并计算这些值的统计量(如四分位数)来估算关键点的距离
         如果搜索范围内没有非零值, 则返回默认距离
         '''
-        distance_list = torch.tensor([])
+        distance_list = np.array([])
         for scope in range(self.point_search_range):
-            if (pixel_coordinates[0] + scope < self.depth_image.shape[1] and 
-                pixel_coordinates[1] + scope < self.depth_image.shape[0]):
-                distance_list = self.depth_image[
+            if (pixel_coordinates[0] + scope < depth_image.shape[1] and 
+                pixel_coordinates[1] + scope < depth_image.shape[0]):
+                distance_list = depth_image[
                     pixel_coordinates[1]-scope:pixel_coordinates[1]+scope+1,
-                    pixel_coordinates[0]-scope:pixel_coordinates[0]+scope+1
-                ].flatten()
-                if torch.sum(distance_list) != 0:
+                    pixel_coordinates[0]-scope:pixel_coordinates[0]+scope+1]
+                if np.sum(distance_list) != 0:
                     break
         distance_list = distance_list[distance_list != 0]
         if len(distance_list) >= 4:
-            distance_list = torch.quantile(distance_list, torch.tensor([0.25, 0.5, 0.75]))
+            distance_list = np.quantile(distance_list, [0.25, 0.5, 0.75])
         elif len(distance_list) == 0:
-            return torch.tensor(10.).unsqueeze(0)
-        return (torch.round(torch.mean(distance_list)* 1000) / 10000).unsqueeze(0)
+            return np.array([10.])
+        return np.array([np.round(np.mean(distance_list) * 1000) / 10000])
         
     def _calibrate(self):
         '''
@@ -504,13 +544,11 @@ class TargetDetection:
 
         self.roll = roll_angle + accel_to_color_rotation[1]
         pitch = pitch_angle + accel_to_color_rotation[0]
-        yaw = self.yaw
-        rospy.loginfo("Calibration successful!")
-        rospy.loginfo("pitch: %2f, roll: %2f, yaw: %2f", pitch, self.roll, yaw)
+        yaw = self.yaw.value
 
         # 计算并发布(彩色相机->机体)旋转矩阵
         color_to_body_rotation = R.from_euler('XYZ', [pitch, self.roll, yaw], degrees=True)
-        self.R_color_to_body_tensor = torch.tensor(color_to_body_rotation.as_matrix(), dtype=torch.float64)
+        self.R_color_to_body = np.array(color_to_body_rotation.as_matrix(), dtype=np.float64)
         self.color_cam_to_body_tf.header.frame_id = "camera_color_frame"
         self.color_cam_to_body_tf.header.stamp = rospy.Time.now()
         self.color_cam_to_body_tf.child_frame_id = "body"
@@ -523,6 +561,14 @@ class TargetDetection:
         self.color_cam_to_body_tf.transform.rotation.w = color_to_body_rotation.as_quat()[3]
         self.cam_broadcaster.sendTransform(self.color_cam_to_body_tf)
 
+        rospy.loginfo("Calibration successful!")
+        rospy.loginfo(f"pitch: {pitch}, roll: {self.roll}, yaw: {yaw}")
+
+    def _clear_npy(self):
+        npy_files = glob.glob('*.npy')
+        for f in npy_files:
+            os.remove(f)
+
     def _time_test(self, key=1):
         '''
         测试指定函数段耗时辅助函数, 并通过info等级消息输出结果
@@ -531,14 +577,15 @@ class TargetDetection:
         @type: int
         '''
         if key == 1:
-            self.start_time = rospy.get_rostime()
+            self.start_time = time.time()
         if key == 2:
-            time1 = (rospy.get_rostime().secs - self.start_time.secs)*1000 + (rospy.get_rostime().nsecs - self.start_time.nsecs)/1000000
-            rospy.loginfo(time1, "ms")
+            end_time = time.time()
+            time_elapsed = (end_time - self.start_time) * 1000 
+            rospy.loginfo(f"{time_elapsed} ms")
 
  
 def main():
-    debug = rospy.get_param('~debug', 'False') == True
+    debug = rospy.get_param('~debug', 'False') == 'True'
     if debug:
         rospy.init_node('cv_joint_angle', log_level=rospy.DEBUG, anonymous=True)
     else:
