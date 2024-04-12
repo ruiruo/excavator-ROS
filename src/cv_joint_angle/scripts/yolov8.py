@@ -45,6 +45,8 @@ class TargetDetection:
             '~quadrilateral_side_length', '[3.2, 5.35, 5.25, 4.3]')), dtype=np.float64)
         self.A2Adown = self.quadrilateral_length[0]
         self.A2B = self.quadrilateral_length[1]
+        self.accel_calibrate_array_size = 0
+        self.accel_calibrate_array = np.array([0.,0.,0.])
         
         # 调试参数
         self.debug = rospy.get_param('~debug', 'False') == 'True'
@@ -71,6 +73,7 @@ class TargetDetection:
         config = rs.config()
         config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 15)
         config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 15)
+        config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 63)
         while True:
             try:
                     pipeline.start(config)#等待直至相机连接
@@ -82,17 +85,9 @@ class TargetDetection:
         align = rs.align(align_to)
 
         #多进程参数
-        self.accel_calibrate_array = multiprocessing.Array('f', 3)
-        self.accel_calibrate_array_size = multiprocessing.Value('i', 0)
         self.apriltag_bag = multiprocessing.Array('f', 8)
         self.yaw = multiprocessing.Value('f', 0)
         self.time_stamp = multiprocessing.Value('i', 0)
-        # 子进程用于接受加速度计数据
-        accel_receive = multiprocessing.Event()
-        accel_receive.set()
-        accel_p = multiprocessing.Process(target=self.accel_process, \
-                                          args=(accel_receive, self.accel_calibrate_array, self.accel_calibrate_array_size,))
-        accel_p.start()
 
         # 小臂apriltag配置
         self.forearm_detector = apriltag.Detector(apriltag.DetectorOptions(
@@ -108,12 +103,14 @@ class TargetDetection:
 
         # 主循环
         while not rospy.is_shutdown() :
+                self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
             # try:
             # 图像获取与预处理12ms 主要为旋转耗时8ms
                 frames = pipeline.wait_for_frames()
                 aligned_frames = align.process(frames)
                 aligned_depth_frame = aligned_frames.get_depth_frame()
                 color_frame = aligned_frames.get_color_frame()
+                accel_frame = frames.first_or_default(rs.stream.accel)
 
                 if  aligned_depth_frame and color_frame:
                     rospy.loginfo_throttle_identical(600,"Get image!")
@@ -137,9 +134,10 @@ class TargetDetection:
                         forearm_receive.set()
 
                 # 将校正后得到的相机外参用于关键点转换
-                if self.accel_calibrate_array_size.value >= 250 and yaw_calibrate.is_set() and not self.tran_flag:
+                if self.accel_calibrate_array_size >= 250 and yaw_calibrate.is_set() and not self.tran_flag:
                     self._calibrate()
-                    accel_p.terminate()
+                else:
+                    self.accecl_collect(accel_frame)
                 # 得到相机外参后计算各关节倾角并发布
                 if self.tran_flag:
                     yolo_result = self._transform_kp(self._predict())
@@ -150,8 +148,6 @@ class TargetDetection:
                          rospy.logwarn_throttle_identical(1, "No data available")
                     self.angle_pub.publish(self.joint_angle)
                     rospy.loginfo_throttle_identical(60, "Node is running...")
-                
-                self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
                 
             # except Exception as e:
             #     rospy.logwarn_throttle_identical(60,\
@@ -255,6 +251,9 @@ class TargetDetection:
                     if (forearm_coordinate[0, 0, :] == forearm_coordinate[0, 1, :]).all():
                         forearm_coordinate = forearm_coordinate[1:, :, :]
                     vector_diff = forearm_coordinate[:, 0, :] - forearm_coordinate[:, 1, :]
+                    if np.any(vector_diff[:, 0] == 0):
+                        rospy.logwarn_throttle_identical(1, "Apriltag is wrong")
+                        break
                     forearm_roll_list = np.degrees(np.arctan(vector_diff[:, 2] / vector_diff[:, 0]))
                     forearm_roll = np.mean(np.sort(forearm_roll_list))
                     roll_sin = np.sin(np.deg2rad(forearm_roll))
@@ -274,56 +273,18 @@ class TargetDetection:
                     apriltag_bag[0] = time_stamp.value
                 forearm_receive.clear()
 
-    def accel_process(self, accel_receive, calibrate_array, calibrate_array_size):
-        '''
-        这进程负责获取加速度计信息并使用递归算法获取当前值用于姿态校正
-        获取的当前值有较大迟滞性。
-
-        @param accel_receive: 事件被设置加速度计数据持续更新
-
-        @param calibrate_array: 最新加速度计数据数组
-        @type  name: multiprocessing.Array
-
-        @param calibrate_array_size: 当前加速度计数据被更新次数
-        @type  name: multiprocessing.Value
-
-        '''
-        pipeline = rs.pipeline()
-        config = rs.config()
-        config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 63)
-        while True:
-            try:
-                    pipeline.start(config)#等待直至相机连接
-                    break
-            except Exception as e:
-                rospy.logwarn_throttle_identical(60,"Please connect camera.")
-        while not rospy.is_shutdown():
-        # 接收到加速度信息更新加速度数据
-            while accel_receive.is_set():
-                try:
-                    frames = pipeline.wait_for_frames()
-                    accel_frame = frames.first_or_default(rs.stream.accel)
-                    if accel_frame:
-                        accel_data = accel_frame.as_motion_frame().get_motion_data()
-                        xyz = [accel_data.x, accel_data.y, accel_data.z]
-                        if calibrate_array_size.value > 0:
-                            # 使用递归算法更新calibrate_array
-                            calibrate_array[0] = calibrate_array[0] + \
-                                (xyz[0] - calibrate_array[0]) / calibrate_array_size.value
-                            calibrate_array[1] = calibrate_array[1] + \
-                                (xyz[1] - calibrate_array[1]) / calibrate_array_size.value
-                            calibrate_array[2] = calibrate_array[2] + \
-                                (xyz[2] - calibrate_array[2]) / calibrate_array_size.value
-                            calibrate_array_size.value += 1
-                        else:
-                            calibrate_array[0] = xyz[0]
-                            calibrate_array[1] = xyz[1]
-                            calibrate_array[2] = xyz[2]
-                            calibrate_array_size.value = 1
-                except Exception as e:
-                    rospy.logwarn_throttle_identical(60,
-                                                    "The accelerometer is subject to severe vibration. Please reconnect the camera.")
-        pipeline.stop()
+    def accecl_collect(self, accel_frame):
+        if accel_frame:
+            accel_data = accel_frame.as_motion_frame().get_motion_data()
+            xyz = np.array([accel_data.x, accel_data.y, accel_data.z])
+            if self.accel_calibrate_array_size > 0:
+                # 使用递归算法更新calibrate_array
+                self.accel_calibrate_array = self.accel_calibrate_array + \
+                    (xyz - self.accel_calibrate_array) / self.accel_calibrate_array_size
+                self.accel_calibrate_array_size += 1
+            else:
+                self.accel_calibrate_array = xyz
+                self.accel_calibrate_array_size = 1
 
     def _predict(self):
             '''
@@ -561,8 +522,7 @@ class TargetDetection:
         self.color_cam_to_body_tf.transform.rotation.w = color_to_body_rotation.as_quat()[3]
         self.cam_broadcaster.sendTransform(self.color_cam_to_body_tf)
 
-        rospy.loginfo("Calibration successful!")
-        rospy.loginfo(f"pitch: {pitch}, roll: {self.roll}, yaw: {yaw}")
+        rospy.loginfo(f"Calibration successful! \n pitch: {pitch}, roll: {self.roll}, yaw: {yaw}")
 
     def _clear_npy(self):
         npy_files = glob.glob('*.npy')
