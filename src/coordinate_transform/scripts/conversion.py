@@ -6,11 +6,11 @@ import math
 from itertools import combinations
 from scipy.spatial.transform import Rotation as R
 import scipy.constants as C
+import pyrealsense2 as rs
 
 from geometry2.tf2_ros.src import tf2_ros
 import rospy
 from geometry_msgs.msg import TransformStamped
-from sensor_msgs.msg import CameraInfo,Imu
 from coordinate_transform.msg import   Coordinate_point, Coordinate_points
 from target_detection.msg import Target_Points
 
@@ -19,35 +19,30 @@ class Coordinate_Point:
         #获取参数与变量初始化
         coordinate_information_topic = rospy.get_param(
             '~coordinate_information_topic', '/target_detection/Target_Points')
-        camera_info_topic = rospy.get_param('~camera_info_topic', '/camera/color/camera_info')
-        accel_info_topic = rospy.get_param('~accel_info_topic', '/camera/accel/sample')
 
         pub_topic = rospy.get_param('~pub_topic', '/coordinate_transform/CoordinatePoint')
 
         self.TargetPoints = Target_Points()
-        self.cam_info = CameraInfo()
-        self.accel_info = Imu()
-        self. color_transform = TransformStamped()
-        self.accel_transform = TransformStamped()
         self.cam_broadcaster = tf2_ros.StaticTransformBroadcaster()
         self.color_cam_to_body_tf = TransformStamped()
         self.yaw_list = []
 
         self.get_sub_time = [rospy.get_rostime(),rospy.get_rostime()]
-        self.K = np.eye(3)
+        # 彩色相机内参按照图片旋转90度变换
+        self.K = np.array([[608.38751221, 0., 233.09431458], 
+                           [  0., 608.90325928, 411.84860229],[  0., 0., 1., ]], dtype=np.float64)
         self.calibration_level_matrix = np.eye(3)
-        self.calibrate_array = np.empty((3,0),dtype=np.float64)
+        self.calibrate_array = np.empty((3,0), dtype=np.float64)
 
-        #相机内参获取定时器
-        self.cam_info_rate = rospy.Rate(1.)
+        # 加速度计pipeline配置
+        accel_pipeline = rs.pipeline()
+        accel_config = rs.config()
+        accel_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 250)
+        accel_pipeline.start(accel_config)
 
         #话题订阅
         self.Target_sub = rospy.Subscriber(coordinate_information_topic, Target_Points, 
                                           queue_size=10, callback=self.conversion_callback)
-        self.cam_info_sub = rospy.Subscriber(camera_info_topic, CameraInfo, 
-                                          queue_size=10, callback=self.info_callback)
-        self.accel_info_sub = rospy.Subscriber(accel_info_topic, Imu, 
-                                               queue_size=5, callback=self.calibration_level_callback)
         self.conversion_buffer = tf2_ros.Buffer(rospy.Time())
         self.conversion_listener = tf2_ros.TransformListener(self.conversion_buffer)
         
@@ -58,13 +53,28 @@ class Coordinate_Point:
         while(not rospy.is_shutdown() ):
             if(rospy.get_rostime().secs - self.get_sub_time[0].secs > 10 ):
                 rospy.logwarn_throttle_identical(60,"Waiting for target detect form yolo node.")
-            if(rospy.get_rostime().secs - self.get_sub_time[1].secs > 2 ):
-                rospy.logwarn_throttle_identical(20,"Waiting for accel info form realsense node.")
+            if(not self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time())):
+                rospy.loginfo_throttle_identical(120,
+                                                "Calibrating...\n Do not move the camera and the devices rigidly connected to it!!!")
+                frames = accel_pipeline.wait_for_frames()
+                accel_frame = frames.first_or_default(rs.stream.accel)
+                if accel_frame:
+                    accel_data = accel_frame.as_motion_frame().get_motion_data()
+                    xyz = np.array([[accel_data.x], [accel_data.y], [accel_data.z]], dtype=np.float64)
+                    self.calibrate_array = np.hstack((self.calibrate_array, xyz))
+        accel_pipeline.stop()
 
     #将校正后得到的相机外参作用于关键点并发布
     def conversion_callback(self, TargetPoints):
         self.get_sub_time[0] = rospy.get_rostime()
         self.TargetPoints = TargetPoints
+        get_yaw = self._get_yaw()
+
+        #满足校准条件开始校准
+        if((np.size(self.calibrate_array) >= 64) and get_yaw and
+            (not self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()))):
+            self._calibrate()
+
         if self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time()):
             self.coordinate_points = Coordinate_points()
             self.coordinate_points.header = TargetPoints.header
@@ -81,46 +91,7 @@ class Coordinate_Point:
                 coordinate_point.y = -coordinate_point.y
                 #x,y,z 前 右 下
                 self.coordinate_points.coordinate_points.append( coordinate_point)
-            self.position_pub.publish(self.coordinate_points)
-
-    #获取相机内参并将内参按照图片旋转90度变换
-    def info_callback(self, cam_info):
-        self.cam_info_rate.sleep()
-        a =  np.array(cam_info.K)
-        a[[0,2,4,5]] = a[[4,5,0,2]]
-        self.K = a.reshape(3,3)
-
-    #经校正获取相机内参
-    def calibration_level_callback(self, accel_info):
-        self.get_sub_time[1] = rospy.get_rostime()
-        if(not self.conversion_buffer.can_transform("camera_color_frame", "body",  rospy.Time())):
-            rospy.loginfo_throttle_identical(120,
-                                             "Calibrating...\n Do not move the camera and the devices rigidly connected to it!!!")
-        
-            #获取加速度计数值
-            self._collect_accel_info(accel_info)
-            get_yaw = self._get_yaw()
-
-            #满足校准条件开始校准
-            if((np.size(self.calibrate_array) >= 64) and get_yaw and
-                (not self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time()))):
-                #获取坐标系转换矩阵信息
-                if(self.conversion_buffer.can_transform("camera_link",  "camera_aligned_depth_to_color_frame", 
-                                                            rospy.Time())):
-                    self.color_transform = self.conversion_buffer.lookup_transform( "camera_link",
-                                                                                "camera_color_frame",  rospy.Time())
-                    self.accel_transform = self.conversion_buffer.lookup_transform("camera_link", "camera_accel_frame",  
-                                                                        rospy.Time())
-                    self._calibrate()
-                else:
-                    rospy.logwarn_throttle_identical(20,"Check if necessary tf exists.")
-
-    #获取加速度计读数
-    def _collect_accel_info(self, info):
-        #accel_info.linear_acceleration.x,y,z 东 天 北 eun
-        xyz = np.array([[info.linear_acceleration.x], [info.linear_acceleration.y], [info.linear_acceleration.z]], 
-                       dtype=np.float64)
-        self.calibrate_array = np.hstack((self.calibrate_array, xyz))
+            self.position_pub.publish(self.coordinate_points)        
 
     #外参旋转矩阵获取
     def _calibrate(self):
@@ -166,10 +137,8 @@ class Coordinate_Point:
 
     def _color_to_body_coordinate_system(self, pitch, roll, yaw):
         R_body_to_color_yaw = R.from_euler('XYZ', [0, 0, yaw], degrees=True)
-        R_camera_to_color = R.from_quat([self.color_transform.transform.rotation.x, 
-                              self.color_transform.transform.rotation.y, 
-                              self.color_transform.transform.rotation.z, 
-                              self.color_transform.transform.rotation.w])
+        R_camera_to_color = R.from_quat([0.00121952651534, -0.00375633803196, 
+                                         -0.000925257743802, 0.999991774559])
         R_body_to_camera_yaw = R_body_to_color_yaw * R_camera_to_color 
         # 加速度计坐标到相机坐标系仅有平移关系
         R_world_to_accel = R.from_euler('XYZ', [pitch, roll, 0], degrees=True)

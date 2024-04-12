@@ -3,8 +3,6 @@
 <launch>
   <node pkg="coordinate_transform" type="conversion.py" name="coordinate" output="screen" >
     <param name="coordinate_information_topic"       value="/target_detection/Target_Points" />
-    <param name="camera_info_topic"       value="/camera/color/camera_info" />
-    <param name="accel_info_topic"       value="/camera/accel/sample" />
     <param name="pub_topic"         value="/coordinate_transform/CoordinatePoint" />
     <param name="calibration_reference"           value='100' /> <!--填入挖掘机机体包括工作装置的长度，辅助提高校准姿态的精确度-->
 

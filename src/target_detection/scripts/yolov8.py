@@ -5,10 +5,9 @@ import cv2
 from geometry2.tf2_ros.src import tf2_ros
 import numpy as np
 from ultralytics import YOLO
+import pyrealsense2 as rs
 
 import rospy
-import message_filters, std_msgs
-from sensor_msgs.msg import Image
 from target_detection.msg import Box_Point, Target_Points, Key_Point
 
 
@@ -18,10 +17,6 @@ class TargetDetection:
         # 加载参数
         weight_path = rospy.get_param('~weight_path', 
                                       "$(find target_detection)/weights/yolov8n-pose.onnx")
-        color_image_topic = rospy.get_param(
-             '~color_image_topic', '/camera/color/image_raw')
-        depth_image_topic = rospy.get_param(
-            '~depth_image_topic', '/camera/aligned_depth_to_color/image_raw')
         pub_topic = rospy.get_param('~pub_topic', '/target_detection/Target_Points')
         # function rospy.get_param spend about 5ms on TX2
         self.half = rospy.get_param('~half', 'False')
@@ -36,71 +31,72 @@ class TargetDetection:
         else:
             self.device = '0'
 
-        #realsense相机图像话题订阅
-        self.color_image = Image()
-        self.depth_image = Image()
-        self.getImageSec = rospy.get_rostime()
-        self.color_sub = message_filters.Subscriber(color_image_topic, Image, 
-                                          queue_size=1, buff_size=9216000)
-        self.depth_sub = message_filters.Subscriber(depth_image_topic, Image,
-                                          queue_size=1, buff_size=9216000)
-        self.ts = message_filters.TimeSynchronizer([self.color_sub, self.depth_sub], 10)
-        self.ts.registerCallback(self.image_callback)
-
         self.calibrate_buffer = tf2_ros.Buffer(rospy.Time())
         self.calibrate_listener = tf2_ros.TransformListener(self.calibrate_buffer)
+
+        #相机图像pipeline配置
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 15)
+        config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 15)
+        pipeline.start(config)
+        align_to = rs.stream.color
+        align = rs.align(align_to)
+
+        self.seq = 0
 
         #发布检测框与关键点话题
         self.position_pub = rospy.Publisher(pub_topic, Target_Points, queue_size=10)
 
         while (not rospy.is_shutdown()) :
-            if(rospy.get_rostime().secs-self.getImageSec.secs > 5):
-                rospy.logwarn_throttle_identical(20,"Waiting for image form target detect node.")
             try:
-                    cv2.imshow("yolov8 inf",self.image)
+                    cv2.imshow("yolov8 inf", image)
                     cv2.waitKey(1)
             except Exception as e:
                 pass
 
-    def image_callback(self, color_image, depth_image):
-        #获取相机话题信息并通知
-        self.TargetPoints = Target_Points()
-        self.TargetPoints.header = color_image.header
-        self.getImageSec = rospy.get_rostime()
-        rospy.loginfo_throttle_identical(600,"Get image!")
+            frames = pipeline.wait_for_frames()
+            aligned_frames = align.process(frames)
+            aligned_depth_frame = aligned_frames.get_depth_frame()
+            color_frame = aligned_frames.get_color_frame()
 
-        #对RGBD相机信息整理与与处理
-        self.color_image = np.frombuffer(color_image.data, dtype=np.uint8).reshape(
-            color_image.height, color_image.width, -1)
-        self.depth_image = np.frombuffer(depth_image.data, dtype=np.uint16).reshape(
-       depth_image.height, depth_image.width)
-        self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
-        # Rotation spend about 8-11ms on TX2
-        self.color_image = cv2.rotate(self.color_image, cv2.ROTATE_90_CLOCKWISE)
-        # equalizeHist spend about 7-11ms on TX2
-        # yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
-        # yuv_image[:,:,0] = cv2.equalizeHist(yuv_image[:,:,0])
-        # self.color_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2RGB)
-        self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
+            if  aligned_depth_frame and color_frame:
+                getImageSec = rospy.get_rostime()
+                rospy.loginfo_throttle_identical(600,"Get image!")
+                self.TargetPoints = Target_Points()
+                self.TargetPoints.header.stamp = rospy.Time.now()
+                self.seq=+1
+                self.TargetPoints.header.seq = self.seq
+                self.TargetPoints.header.frame_id = "camera_color_frame"
 
-        #输出模型监测结果，并导出预览图片与整理检测结果
-        # yolov8-pose (half) spend about 100-125ms on TX2
-        results = self.model(self.color_image, conf=self.conf, 
-                             device=self.device, half=self.half)
-        # yolov8-pose plot spend about 25-35ms on TX2
-        self.image = results[0].plot()
+                self.depth_image = np.asanyarray(aligned_depth_frame.get_data())
+                color_image = np.asanyarray(color_frame.get_data())
+                # color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+                color_image = cv2.rotate(color_image, cv2.ROTATE_90_CLOCKWISE)
+                self.depth_image = cv2.rotate(self.depth_image, cv2.ROTATE_90_CLOCKWISE)
 
-        if any(results[0].boxes.cls):
-            boxes = [
-                [results[0].names[int(cls)]] + [float(conf)] + xywh.tolist() + keypoints_xy.tolist()
-                for cls, conf, xywh, keypoints_xy in zip(
-                    results[0].boxes.cls,
-                    results[0].boxes.conf,
-                    results[0].boxes.xywh,
-                    results[0].keypoints.xy)]
-            self._data_push(boxes)#spend 2ms
-        else:
-           rospy.logwarn_throttle_identical(10,"No valid targets detected")
+                #输出模型监测结果，并导出预览图片与整理检测结果
+                # yolov8-pose (half) spend about 100-125ms on TX2
+                results = self.model(color_image, conf=self.conf, device=self.device, half=self.half)
+                # yolov8-pose plot spend about 25-35ms on TX2
+                image = results[0].plot()
+
+                if any(results[0].boxes.cls):
+                    boxes = [
+                        [results[0].names[int(cls)]] + [float(conf)] + xywh.tolist() + keypoints_xy.tolist()
+                        for cls, conf, xywh, keypoints_xy in zip(
+                            results[0].boxes.cls,
+                            results[0].boxes.conf,
+                            results[0].boxes.xywh,
+                            results[0].keypoints.xy)]
+                    self._data_push(boxes)#spend 2ms
+                else:
+                    rospy.logwarn_throttle_identical(10,"No valid targets detected")
+            
+            if(rospy.get_rostime().secs - getImageSec.secs > 5):
+                rospy.logwarn_throttle_identical(20,"Waiting for image form target detect node.")
+        pipeline.stop()
+        cv2.destroyAllWindows()
 
     def _data_push(self, boxes):
         can_transform = self.calibrate_buffer.can_transform("camera_color_frame", "body", rospy.Time())
