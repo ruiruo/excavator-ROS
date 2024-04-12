@@ -66,7 +66,7 @@ class TargetDetection:
 
         #相机参数
         self.K = np.array([[622.461673, 0., 225.527207], 
-                           [  0., 620.817214, 418.324731],[  0., 0., 1., ]], dtype=np.float64)
+                           [  0., 620.817214, 418.324731],[  0., 0., 1.]], dtype=np.float64)
         self.inv_K = np.linalg.inv(self.K) 
         #相机图像pipeline配置
         pipeline = rs.pipeline()
@@ -103,9 +103,8 @@ class TargetDetection:
 
         # 主循环
         while not rospy.is_shutdown() :
-                self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
-            # try:
-            # 图像获取与预处理12ms 主要为旋转耗时8ms
+            self.tran_flag = self.conversion_buffer.can_transform("camera_color_frame", "body", rospy.Time())
+            try:
                 frames = pipeline.wait_for_frames()
                 aligned_frames = align.process(frames)
                 aligned_depth_frame = aligned_frames.get_depth_frame()
@@ -113,13 +112,15 @@ class TargetDetection:
                 accel_frame = frames.first_or_default(rs.stream.accel)
 
                 if  aligned_depth_frame and color_frame:
-                    rospy.loginfo_throttle_identical(600,"Get image!")
+                    rospy.loginfo_once("Get image!")
+                    #创建发布信息并赋值Header
                     self.joint_angle = Joint_angle()
                     self.joint_angle.header.stamp = rospy.Time.now()
-                    self.seq =+ 1
+                    self.seq += 1
                     self.joint_angle.header.seq = self.seq
                     self.joint_angle.header.frame_id = "camera_color_frame"
 
+                    #预处理RGBD信息并保存nparray同步给子进程
                     time_stamp = self.joint_angle.header.stamp.nsecs
                     self.time_stamp.value = time_stamp
                     color_image = np.asanyarray(color_frame.get_data())
@@ -133,13 +134,16 @@ class TargetDetection:
                     if os.path.exists(color_image_name) and os.path.exists(depth_image_name):
                         forearm_receive.set()
 
+                #收集加速度计信息
+                if self.accel_calibrate_array_size < 250 and not self.tran_flag:
+                    self._accecl_collect(accel_frame)
                 # 将校正后得到的相机外参用于关键点转换
                 if self.accel_calibrate_array_size >= 250 and yaw_calibrate.is_set() and not self.tran_flag:
                     self._calibrate()
-                else:
-                    self.accecl_collect(accel_frame)
+
                 # 得到相机外参后计算各关节倾角并发布
                 if self.tran_flag:
+                    #与apriltag多进程同步TX2运行耗时45-50ms
                     yolo_result = self._transform_kp(self._predict())
                     result = self._bucket_attitude(yolo_result[:2,:])
                     if result is not None:
@@ -149,9 +153,11 @@ class TargetDetection:
                     self.angle_pub.publish(self.joint_angle)
                     rospy.loginfo_throttle_identical(60, "Node is running...")
                 
-            # except Exception as e:
-            #     rospy.logwarn_throttle_identical(60,\
-            #                                      "Unable to obtain camera image data, check if camera is working.")
+            except Exception as e:
+                rospy.logwarn_throttle_identical(60,\
+                                                 "Unable to obtain camera image data, check if camera is working.")
+                
+        #结束子进程, 清空文件窗口, 停止接受相机信息
         forearm_p.terminate()
         self._clear_npy()
         cv2.destroyAllWindows()
@@ -165,9 +171,18 @@ class TargetDetection:
 
         @param forearm_receive: 被设置时进程将持续更新数据
 
+        @param yaw: 机体与相机yaw夹角估计值
+        @type  name: multiprocessing.Value
+
+        @param yaw_cal: 被设置时表示yaw校准合格
+
         @param apriltag_bag: 最新小臂姿态信息
         @type  name: multiprocessing.Array
+
+        @param time_stamp: 主进程RGBD数据时间戳
+        @type  name: multiprocessing.Value
         '''
+        # 子进程运行TX2耗时22-25ms
         yaw_count = 1.
         while not rospy.is_shutdown():
             while forearm_receive.is_set():
@@ -273,7 +288,16 @@ class TargetDetection:
                     apriltag_bag[0] = time_stamp.value
                 forearm_receive.clear()
 
-    def accecl_collect(self, accel_frame):
+    def _accecl_collect(self, accel_frame):
+        '''
+        收集加速度数据并更新校准数组。
+
+        此方法接收一个加速度帧，从中提取加速度数据，并更新校准数组。
+        如果校准数组尚未初始化（即大小为零），则直接将当前帧的加速度数据作为初始值。
+        如果校准数组已经有值，则使用递归平均算法更新数组，以便平滑地集成新的加速度数据。
+
+        @param accel_frame: 加速度帧，包含当前时刻的加速度传感器数据。
+        '''
         if accel_frame:
             accel_data = accel_frame.as_motion_frame().get_motion_data()
             xyz = np.array([accel_data.x, accel_data.y, accel_data.z])
@@ -457,6 +481,9 @@ class TargetDetection:
         @param pixel_coordinates: 指定关键点的像素坐标
         @type pixel_coordinates: np.array
 
+        @param depth_image: 深度图像数据
+        @type pixel_coordinates: np.array
+
         @return: 计算得到的关键点距离
         @rtype: np.array
 
@@ -525,6 +552,9 @@ class TargetDetection:
         rospy.loginfo(f"Calibration successful! \n pitch: {pitch}, roll: {self.roll}, yaw: {yaw}")
 
     def _clear_npy(self):
+        '''
+        清除进程间通信的图片nparray文件
+        '''
         npy_files = glob.glob('*.npy')
         for f in npy_files:
             os.remove(f)
