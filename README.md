@@ -25,9 +25,14 @@ git submodule update --init --recursive
 - 安装mavros的依赖与地理列表数据集
 
 ```
-sudo apt-get install ros-melodic-geographic-msgs -y
-rosdep install --from-paths src/mav* --ignore-src -y
+sudo apt-get install ros-melodic-geographic-msgs ros-melodic-mavros ros-melodic-mavros-extras libgeographic-dev -y
 sudo ./src/mavros/mavros/scripts/install_geographiclib_datasets.sh
+```
+
+- 安装realsense的依赖
+
+```
+sudo apt-get install ros-melodic-realsense2-camera ros-melodic-realsense2-description -y
 ```
 
 - 修改`~/.bashrc`使得其他节点能调用源代码编译的tf2
@@ -64,16 +69,16 @@ virtualenv path/to/virtualenvname -p path/to/python3
 source path/to/vitualenvname/bin/activate
 ```
 
-- 在虚拟环境中安装ultralytics与pyrealsense2
+- 在虚拟环境中安装依赖, 若权重文件使用.onnx类型则额外安装onnx onnxruntime
 
 ```
-pip install ultralytics pyrealsense2
+pip install ultralytics pyrealsense2 apriltag rospkg
 ```
 
-- 编译ROS包
+- 安装编译ROS包的依赖
 
 ```
-sudo apt-get install python-catkin-tools -y
+sudo apt-get install python-catkin-tools libxml2 libxml2-dev libxslt1.1 libxslt1-dev -y
 ```
 
 1. 清除以往的编译文件
@@ -85,15 +90,15 @@ catkin clean
 2. 安装编译的依赖(非虚拟环境)
 
 ```
-python3.6 -m pip install empy==3.3.4 catkin_pkg 
+python3.6 -m pip install empy==3.3.4 catkin_pkg futur lxml
 sudo apt-get install python-pip
-python2 -m pip insatll empy==3.3.4
+python2 -m pip install empy==3.3.4
 ```
 
 3. 使用python3解释器编译在python3环境下运行的节点(不要在虚拟环境编译)
 
 ```
-catkin build geometry2 cv_joint_angle --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
+catkin build mavlink mavros geometry2 cv_joint_angle --cmake-args   -DCMAKE_BUILD_TYPE=Release  -DPYTHON_EXECUTABLE=/usr/bin/python3    -DPYTHON_INCLUDE_DIR=/usr/include/python3.6m    -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.6m.so
 ```
 
 4. 编译其余节点
@@ -112,8 +117,8 @@ sudo gedit /opt/ros/melodic/share/cv_bridge/cmake/cv_bridgeConfig.cmake
 
 ## 基本用法
 
-1. 首先，确保将训练好的权重放在 [target_detection 文件夹](https://gitee.com/lisq58/excavator_detect/src/target_detection)中。
-2. [yolov8.launch文件](https://gitee.com/lisq58/excavator_detect/src/target_detection/launch/yolov8.launch) 中设置权重文件与推理相关参数设置
+1. 首先，确保将训练好的权重放在 [cv_joint_angle/weights 文件夹](https://gitee.com/lisq58/excavator_detect/src/cv_joint_angle/weights)中。
+2. [yolov8.launch文件](https://gitee.com/lisq58/excavator_detect/src/cv_joint_angle/launch/yolov8.launch) 中设置权重文件与推理相关参数设置
 3. 将环境变量加入bash
 
 ```
