@@ -186,107 +186,177 @@ class TargetDetection:
         yaw_count = 1.
         while not rospy.is_shutdown():
             while forearm_receive.is_set():
-                color_image = None
-                depth_image = None
-                npy_files = glob.glob('*.npy')
-                if len(npy_files)>=2:
-                    split_names = [os.path.splitext(f)[0].split('_') for f in npy_files]
-                    grouped_files = {}
-                    for name_parts in split_names:
-                        if name_parts[0] not in grouped_files:
-                            grouped_files[name_parts[0]] = []
-                        grouped_files[name_parts[0]].append('_'.join(name_parts))
-                    for timestamp, files in grouped_files.items():
-                        if int(timestamp) !=  time_stamp.value:
-                            continue
-                        for file in files:
-                            if 'color' in file:
-                                color_image = np.load(f"{file}.npy")
-                            elif 'depth' in file:
-                                depth_image = np.load(f"{file}.npy").astype(np.float64)
-                if rospy.get_time()-self.start_time>5:
-                    if len(npy_files)<2 :
-                        rospy.logwarn_throttle_identical(5, "Forearm_process didn't find picture")
-                        break
-                    elif color_image is None or depth_image is None:
-                        rospy.logwarn_throttle_identical(5, 
-                                                        "Forearm_process cannot find an image with a suitable timestamp")
-                        self._clear_npy()
-                        break
-                else :
-                    if len(npy_files)<2 or color_image is None or depth_image is None:
-                        self._clear_npy()
-                        break
+                images = self._get_image_files(time_stamp.value)
+                if images is None:
+                    break
+                color_image, depth_image = images 
                 self._clear_npy()
+
                 # yuv_image = cv2.cvtColor(self.color_image, cv2.COLOR_RGB2YUV)
                 # yuv_image[:, :, 0] = cv2.equalizeHist(yuv_image[:, :, 0])
                 # gray = yuv_image[:, :, 0]
                 gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
-                tags = self.forearm_detector.detect(gray)
-                if tags == [] and rospy.get_time()-self.start_time>5:
-                        rospy.logwarn_throttle_identical(5, "No apriltag detected")
-                        break
-                else:
-                    num = len(tags)
-                    rospy.logdebug_throttle(10, "Have %d apriltag(s) detected", num)
-                forearm_list = None
-                for tag in tags:
-                    if tag.tag_family == b'tag36h11' and tag.tag_id == 5:
-                        num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
-                        if not yaw_cal.is_set():
-                            angle = [-np.degrees(np.arctan(r[1, 0] / r[0, 0])) for r in Rs[::2]]
-                            first_angle = float(angle[0]) if angle else None
-                            if   first_angle is None:
-                                break
-                            if math.isclose(yaw_count, 1.):
-                                yaw.value = first_angle
-                            else:
-                                yaw.value += (first_angle - yaw.value) / yaw_count
-                                if yaw_count>100:
-                                    yaw_count = 1.
-                            yaw_count += 1
-                            if 15 < yaw.value < 30 and abs(yaw.value - first_angle) < 0.25:
-                                yaw_cal.set()
-                                yaw_count = 1.
-                                break
-                        else:
-                            if forearm_list is not None:
-                                forearm_list[0, 0, :] = tag.center
-                                forearm_list = np.vstack([forearm_list, 
-                                                        np.expand_dims(np.array([tag.corners[0], tag.corners[3]]), axis=0), 
-                                                        np.expand_dims(np.array([tag.corners[1], tag.corners[2]]), axis=0)])
-                            else:
-                                forearm_list = np.array([np.array([tag.center, tag.center]),
-                                                        np.array([tag.corners[0], tag.corners[3]]), 
-                                                        np.array([tag.corners[1], tag.corners[2]])])
+                forearm_list = self._apriltag_predict(gray, yaw, yaw_cal, yaw_count)
+                
                 if yaw_cal.is_set() and forearm_list is not None:
-                    forearm_list = self._get_distance(forearm_list, depth_image)
-                    forearm_coordinate = self._transform_kp(forearm_list)
-                    center = forearm_coordinate[0, 0] if forearm_coordinate[0, 0, 2] > forearm_coordinate[0, 1, 2] else forearm_coordinate[0, 1]
-                    if (forearm_coordinate[0, 0, :] == forearm_coordinate[0, 1, :]).all():
-                        forearm_coordinate = forearm_coordinate[1:, :, :]
-                    vector_diff = forearm_coordinate[:, 0, :] - forearm_coordinate[:, 1, :]
-                    if np.any(vector_diff[:, 0] == 0):
-                        rospy.logwarn_throttle_identical(1, "Apriltag is wrong")
+                    forearm_info = self._get_forearm_info(forearm_list, depth_image)
+                    if forearm_info is None:
                         break
-                    forearm_roll_list = np.degrees(np.arctan(vector_diff[:, 2] / vector_diff[:, 0]))
-                    forearm_roll = np.mean(np.sort(forearm_roll_list))
-                    roll_sin = np.sin(np.deg2rad(forearm_roll))
-                    roll_cos = np.cos(np.deg2rad(forearm_roll))
-                    A_apriltag = center + np.dot(
-                        self.center2A, np.array([[roll_sin, 0, roll_cos], [0, 1, 0], [roll_cos, 0, -roll_sin]], dtype=np.float64))
-                    Adown_apriltag = A_apriltag + np.array(
-                        [roll_cos * self.A2Adown, 0, roll_sin * self.A2Adown], dtype=np.float64)
-
-                    apriltag_bag[1] = forearm_roll
-                    apriltag_bag[2] = A_apriltag[0]
-                    apriltag_bag[3] = A_apriltag[1]
-                    apriltag_bag[4] = A_apriltag[2]
-                    apriltag_bag[5] = Adown_apriltag[0]
-                    apriltag_bag[6] = Adown_apriltag[1]
-                    apriltag_bag[7] = Adown_apriltag[2]
                     apriltag_bag[0] = time_stamp.value
+                    apriltag_bag[1] = forearm_info[0]
+                    apriltag_bag[2] = forearm_info[1][0]
+                    apriltag_bag[3] = forearm_info[1][1]
+                    apriltag_bag[4] = forearm_info[1][2]
+                    apriltag_bag[5] = forearm_info[2][0]
+                    apriltag_bag[6] = forearm_info[2][1]
+                    apriltag_bag[7] = forearm_info[2][2]
                 forearm_receive.clear()
+
+    def _get_forearm_info(self, forearm_list, depth_image):
+        '''
+        通过forearm_list中小臂关键点的坐标值输出小臂姿态与A, A_down关键点坐标
+
+        @param forearm_list: 指定关键点的像素坐标
+        @type forearm_list: np.array
+
+        @param depth_image: 深度图像数据
+        @type depth_image: np.array
+
+        @return: 小臂的滚动角度以及A和A_down关键点的坐标。
+        @rtype: tuple
+
+        该函数首先计算深度图像中指定像素坐标处的距离, 然后转换为实际坐标
+        接着, 它计算小臂的滚动角度, 并使用这个角度来确定A和A_down关键点的位置
+        如果在计算过程中发现Apriltag标记错误, 则函数将返回None
+        '''
+        forearm_list = self._get_distance(forearm_list, depth_image)
+        forearm_coordinate = self._transform_kp(forearm_list)
+        center = forearm_coordinate[0, 0] if forearm_coordinate[0, 0, 2] > forearm_coordinate[0, 1, 2] else forearm_coordinate[0, 1]
+        if (forearm_coordinate[0, 0, :] == forearm_coordinate[0, 1, :]).all():
+            forearm_coordinate = forearm_coordinate[1:, :, :]
+        vector_diff = forearm_coordinate[:, 0, :] - forearm_coordinate[:, 1, :]
+        if np.any(vector_diff[:, 0] == 0):
+            rospy.logwarn_throttle_identical(1, "Apriltag is wrong")
+            return None
+        forearm_roll_list = np.degrees(np.arctan(vector_diff[:, 2] / vector_diff[:, 0]))
+        forearm_roll = np.mean(np.sort(forearm_roll_list))
+        roll_sin = np.sin(np.deg2rad(forearm_roll))
+        roll_cos = np.cos(np.deg2rad(forearm_roll))
+        A_apriltag = center + np.dot(
+            self.center2A, np.array([[roll_sin, 0, roll_cos], [0, 1, 0], [roll_cos, 0, -roll_sin]], dtype=np.float64))
+        Adown_apriltag = A_apriltag + np.array(
+            [roll_cos * self.A2Adown, 0, roll_sin * self.A2Adown], dtype=np.float64)
+        return forearm_roll, A_apriltag, Adown_apriltag
+
+    def _apriltag_predict(self, image, yaw, yaw_cal, yaw_count):
+        '''
+        通过检测图像中的Apriltag标记来预测小臂姿态, 并更新yaw值
+
+        @param image: 输入图像, 用于检测Apriltag标记
+        @type image: np.array
+
+        @param yaw: 当前的yaw值, 将根据检测到的Apriltag标记进行更新
+        @type yaw: multiprocessing.Value
+
+        @param yaw_cal: 一个事件标志, 用于指示是否已经校准了yaw值
+        @type yaw_cal: threading.Event
+
+        @param yaw_count: 用于平滑yaw值更新的计数器
+        @type yaw_count: float
+
+        @return: 如果检测到Apriltag标记且未校准yaw值, 则返回None; 否则返回更新的forearm_list
+        @rtype: np.array 或 None
+
+        该函数首先尝试在输入图像中检测Apriltag标记 
+        如果在一定时间内未检测到标记, 将发出警告
+        如果检测到标记, 将根据标记的homography矩阵计算小臂的滚动角度, 并更新yaw值
+        如果yaw值在特定范围内并且与第一个角度的差异小于1度, 则设置yaw_cal标志
+        '''
+        forearm_list = None
+        tags = self.forearm_detector.detect(image)
+        if tags == [] and rospy.get_time()-self.start_time>5:
+                rospy.logwarn_throttle_identical(5, "No apriltag detected")
+                return None
+        else:
+            num = len(tags)
+            rospy.logdebug_throttle(10, "Have %d apriltag(s) detected", num)
+        for tag in tags:
+            if tag.tag_family == b'tag36h11' and tag.tag_id == 5:
+                num, Rs, Ts, Ns = cv2.decomposeHomographyMat(tag.homography, self.K)
+                if not yaw_cal.is_set():
+                    angle = [-np.degrees(np.arctan(r[1, 0] / r[0, 0])) for r in Rs[::2]]
+                    first_angle = float(angle[0]) if angle else None
+                    if   first_angle is None:
+                        break
+                    if math.isclose(yaw_count, 1.):
+                        yaw.value = first_angle
+                    else:
+                        yaw.value += (first_angle - yaw.value) / yaw_count
+                        if yaw_count>100:
+                            yaw_count = 1.
+                    yaw_count += 1
+                    if 15 < yaw.value < 30 and abs(yaw.value - first_angle) < 1:
+                        yaw_cal.set()
+                        yaw_count = 1.
+                        return None
+                else:
+                    if forearm_list is not None:
+                        forearm_list[0, 0, :] = tag.center
+                        forearm_list = np.vstack([forearm_list, 
+                                                np.expand_dims(np.array([tag.corners[0], tag.corners[3]]), axis=0), 
+                                                np.expand_dims(np.array([tag.corners[1], tag.corners[2]]), axis=0)])
+                    else:
+                        forearm_list = np.array([np.array([tag.center, tag.center]),
+                                                np.array([tag.corners[0], tag.corners[3]]), 
+                                                np.array([tag.corners[1], tag.corners[2]])])
+        return forearm_list
+
+    def _get_image_files(self, time_stamp):
+        '''
+        根据时间戳获取对应的彩色图像和深度图像文件
+
+        @param time_stamp: 需要获取图像的时间戳
+        @type time_stamp: int
+
+        @return: 如果找到对应时间戳的图像, 则返回彩色图像和深度图像; 否则返回None
+        @rtype: tuple 或 None
+
+        该函数首先搜索所有的.npy文件, 然后根据文件名中的时间戳将它们分组
+        如果找到与给定时间戳匹配的图像文件, 它将加载这些文件并返回
+        如果在一定时间内未找到匹配的文件, 将发出警告
+        '''
+        color_image = None
+        depth_image = None
+        npy_files = glob.glob('*.npy')
+        if len(npy_files)>=2:
+            split_names = [os.path.splitext(f)[0].split('_') for f in npy_files]
+            grouped_files = {}
+            for name_parts in split_names:
+                if name_parts[0] not in grouped_files:
+                    grouped_files[name_parts[0]] = []
+                grouped_files[name_parts[0]].append('_'.join(name_parts))
+            for timestamp, files in grouped_files.items():
+                if int(timestamp) !=  time_stamp:
+                    continue
+                for file in files:
+                    if 'color' in file:
+                        color_image = np.load(f"{file}.npy")
+                    elif 'depth' in file:
+                        depth_image = np.load(f"{file}.npy").astype(np.float64)
+        if rospy.get_time()-self.start_time>5:
+            if len(npy_files)<2 :
+                rospy.logwarn_throttle_identical(5, "Forearm_process didn't find picture")
+                return None
+            elif color_image is None or depth_image is None:
+                rospy.logwarn_throttle_identical(5, 
+                                                "Forearm_process cannot find an image with a suitable timestamp")
+                self._clear_npy()
+                return None
+        else :
+            if len(npy_files)<2 or color_image is None or depth_image is None:
+                self._clear_npy()
+                return None
+        return color_image, depth_image
 
     def _accecl_collect(self, accel_frame):
         '''
